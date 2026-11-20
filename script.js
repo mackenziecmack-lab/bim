@@ -2,7 +2,14 @@
 const $ = id => document.getElementById(id);
 
 // ---------- Estado ----------
-let token = sessionStorage.getItem('cb_token') || '';
+const lerToken = () => { try { return localStorage.getItem('cb_token') || sessionStorage.getItem('cb_token') || ''; } catch (e) { return ''; } };
+const guardarToken = t => {
+  try {
+    if (t) localStorage.setItem('cb_token', t);
+    else { localStorage.removeItem('cb_token'); sessionStorage.removeItem('cb_token'); }
+  } catch (e) {}
+};
+let token = lerToken();   // fica salvo no aparelho: fechar a aba não desloga
 let eu = '';
 let meu = { bio: '', avatar: '', theme: 'azul' };
 let souAdmin = false;
@@ -19,6 +26,9 @@ const chats = {};          // chave -> chat
 const janelas = {};        // id -> elemento (janelas extras)
 const renders = {};        // id -> função que redesenha a janela
 const gruposAbertos = { online: true, offline: true, grupos: true };
+let naoLidas = {};         // chave da conversa -> quantidade de mensagens novas
+let jaIniciou = false;
+let tentativasRec = 0, recTimer = null, ocultoDesde = 0;
 
 const TEMAS = [
   ['azul', '#1b5fd6', 'Azul'], ['rosa', '#ee5fa4', 'Rosa'], ['verde', '#2fa84a', 'Verde'],
@@ -149,8 +159,7 @@ function botao(texto, fn, extra) {
 
 // ---------- API ----------
 const MSG_SERVIDOR =
-  'Sem conexão com o servidor. Rode "node server.js" na pasta e abra http://localhost:3000 ' +
-  '(não abra o index.html direto nem por outro servidor).';
+  'Sem conexão com o servidor. Se ele estava dormindo, espere cerca de 1 minuto e tente de novo.';
 
 async function api(rota, corpo) {
   let r;
@@ -205,7 +214,7 @@ async function enviarLogin() {
     if (modoCadastro) corpo.codigo = $('f-codigo').value;
     const r = await api(modoCadastro ? 'register' : 'login', corpo);
     token = r.token;
-    sessionStorage.setItem('cb_token', token);
+    guardarToken(token);
     $('f-pass').value = ''; $('f-pass2').value = ''; $('f-codigo').value = '';
     conectar();
   } catch (e) {
@@ -221,9 +230,11 @@ $('btn-principal').addEventListener('click', enviarLogin);
 function voltarAoLogin(msg, erro) {
   if (es) { es.close(); es = null; }
   token = ''; eu = ''; amigos = []; pedidos = []; bloqueados = []; grupos = []; selecionado = ''; souAdmin = false;
-  sessionStorage.removeItem('cb_token');
+  guardarToken('');
   Object.keys(chats).forEach(k => { chats[k].janela.remove(); delete chats[k]; });
   fecharTodasJanelas();
+  clearTimeout(recTimer); tentativasRec = 0; jaIniciou = false; naoLidas = {};
+  Object.keys(toasts).forEach(removerToast);
   $('lista-win').classList.add('escondido');
   $('login-win').classList.remove('escondido');
   document.title = 'BIM';
@@ -231,15 +242,43 @@ function voltarAoLogin(msg, erro) {
 }
 
 // ---------- Conexão em tempo real ----------
+function mostrarReconectando(sim) {
+  if (!eu) { status(sim ? 'Conectando... (se o servidor estava dormindo, pode levar até 1 minuto)' : ''); return; }
+  $('lista-titulo').textContent = sim ? 'Reconectando...' : 'Lista de Amigos de ' + eu;
+}
+function agendarReconexao() {
+  clearTimeout(recTimer);
+  const espera = Math.min(30000, 2000 * Math.pow(2, Math.min(tentativasRec, 4)));
+  tentativasRec++;
+  recTimer = setTimeout(async () => {
+    if (!token) return;
+    try {
+      const r = await fetch('/api/sessao?token=' + encodeURIComponent(token));
+      if (r.status === 401) return voltarAoLogin('Sessão expirada. Entre novamente.', true);
+    } catch (e) {}
+    if (token) conectar();
+  }, espera);
+}
+// Ao voltar para o site depois de um tempo, garante que a conexão está viva
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { ocultoDesde = Date.now(); return; }
+  if (!token) return;
+  const faz = ocultoDesde && Date.now() - ocultoDesde > 30000;
+  if (!es || es.readyState !== EventSource.OPEN || faz) conectar();
+});
+
 function conectar() {
+  clearTimeout(recTimer);
   if (es) es.close();
   let iniciou = false;
   es = new EventSource('/api/stream?token=' + encodeURIComponent(token));
 
   es.addEventListener('init', e => {
     iniciou = true;
+    tentativasRec = 0;
     const d = JSON.parse(e.data);
     eu = d.me;
+    carregarNaoLidas();
     meu = { bio: d.bio || '', avatar: d.avatar || '', theme: d.theme || 'azul' };
     souAdmin = !!d.admin;
     amigos = d.buddies; pedidos = d.requests; bloqueados = d.blocked; grupos = d.groups || [];
@@ -251,12 +290,31 @@ function conectar() {
     atualizarPerfilMini();
     desenharLista();
     atualizarBadgePedidos();
-    somPorta();
+    if (!jaIniciou) somPorta();
+    jaIniciou = true;
+    // Mensagens que chegaram enquanto você estava fora viram avisos (nada abre sozinho)
+    const contagem = {};
     (d.unread || []).forEach(n => {
-      const c = n[0] === '#' ? abrirGrupo(n.slice(1), true) : abrirChat(n, true);
-      if (c) avisarNova(c);
+      const k = n[0] === '#' ? 'g:' + n.slice(1) : n.toLowerCase();
+      if (!chats[k]) contagem[k] = (contagem[k] || 0) + 1;
     });
-    if ((d.unread || []).length) somRecebe();
+    const novos = Object.keys(contagem);
+    novos.forEach(k => { naoLidas[k] = (naoLidas[k] || 0) + contagem[k]; });
+    if (novos.length) {
+      salvarNaoLidas();
+      somRecebe();
+      const quem = novos.map(nomeDeChave).join(', ');
+      mostrarToast('resumo', '💬 Mensagens novas', '', 'De: ' + quem, null);
+      notificacaoSistema('BIM - mensagens novas', 'De: ' + quem);
+    }
+    desenharLista();
+    atualizarTituloAba();
+    Object.values(chats).forEach(recarregarHistorico);
+    if ('Notification' in window && Notification.permission === 'default') {
+      document.addEventListener('pointerdown', () => {
+        try { if (Notification.permission === 'default') Notification.requestPermission(); } catch (err) {}
+      }, { once: true });
+    }
   });
 
   es.addEventListener('presence', e => {
@@ -291,6 +349,7 @@ function conectar() {
       return;
     }
     if (selecionado.toLowerCase() === velha) selecionado = d.name;
+    if (naoLidas[velha] && velha !== nova) { naoLidas[nova] = naoLidas[velha]; delete naoLidas[velha]; salvarNaoLidas(); }
     const c = chats[velha];
     if (c && velha !== nova) {
       delete chats[velha]; chats[nova] = c;
@@ -307,9 +366,11 @@ function conectar() {
   es.addEventListener('banned', () => voltarAoLogin('Sua conta foi suspensa.', true));
 
   es.onerror = () => {
-    if (es && es.readyState === EventSource.CLOSED) {
-      voltarAoLogin(iniciou ? 'Conexão perdida.' : 'Não foi possível conectar.', true);
-    }
+    if (!es) return;
+    mostrarReconectando(true);
+    if (es.readyState !== EventSource.CLOSED) return;  // o navegador tenta sozinho
+    es.close();
+    agendarReconexao();  // servidor acordando ou sem internet: tenta de novo, sem deslogar
   };
 }
 
@@ -373,18 +434,27 @@ function desenharLista() {
   }
   secaoGrupos(box);
 }
+function badgeNL(k) {
+  return naoLidas[k] ? '<span class="badge-nl">' + naoLidas[k] + '</span>' : '';
+}
 function secaoGrupos(box) {
-  if (!grupos.length) return;
   const t = document.createElement('div');
   t.className = 'grupo-titulo';
   t.textContent = (gruposAbertos.grupos ? '▼ ' : '▶ ') + 'Grupos (' + grupos.length + ')';
   t.addEventListener('click', () => { gruposAbertos.grupos = !gruposAbertos.grupos; desenharLista(); });
   box.appendChild(t);
   if (!gruposAbertos.grupos) return;
+  if (!grupos.length) {
+    const v = document.createElement('div');
+    v.className = 'vazio';
+    v.textContent = 'Nenhum grupo ainda. Toque em "👥 Novo grupo" para criar um.';
+    box.appendChild(v);
+    return;
+  }
   grupos.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).forEach(g => {
     const l = document.createElement('div');
-    l.className = 'amigo';
-    l.innerHTML = '<span><span class="mini-av">👥</span>' + esc(g.name) + ' (' + g.members.length + ')</span>';
+    l.className = 'amigo' + (naoLidas['g:' + g.id] ? ' nova' : '');
+    l.innerHTML = '<span><span class="mini-av">👥</span>' + esc(g.name) + ' (' + g.members.length + ')</span>' + badgeNL('g:' + g.id);
     l.addEventListener('click', () => abrirGrupo(g.id));
     box.appendChild(l);
   });
@@ -399,9 +469,10 @@ function grupo(box, id, titulo, lista) {
   lista.forEach(a => {
     const l = document.createElement('div');
     l.className = 'amigo' + (a.online ? (a.away ? ' away' : '') : ' offline') +
-      (a.name.toLowerCase() === selecionado.toLowerCase() ? ' sel' : '');
+      (a.name.toLowerCase() === selecionado.toLowerCase() ? ' sel' : '') +
+      (naoLidas[a.name.toLowerCase()] ? ' nova' : '');
     const ausente = a.online && a.away;
-    l.innerHTML = '<span>' + miniAv(a.avatar) + esc(a.name) + (ausente ? ' (ausente)' : '') + '</span>';
+    l.innerHTML = '<span>' + miniAv(a.avatar) + esc(a.name) + (ausente ? ' (ausente)' : '') + '</span>' + badgeNL(a.name.toLowerCase());
     l.addEventListener('click', () => { selecionado = a.name; desenharLista(); });
     l.addEventListener('dblclick', () => abrirChat(a.name));
     box.appendChild(l);
@@ -694,10 +765,159 @@ const EMO_SVG = {
   ':|': rosto(OLHOS + "<path d='M7.5 16 H16.5' fill='none' stroke='#222' stroke-width='1.7' stroke-linecap='round'/>"),
   '<3': "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><defs><radialGradient id='h' cx='35%' cy='30%' r='80%'><stop offset='0' stop-color='#ff9aa8'/><stop offset='.5' stop-color='#e8112d'/><stop offset='1' stop-color='#a00018'/></radialGradient></defs><path d='M12 21.5 C4 15 1.8 10.5 1.8 7.6 C1.8 4.7 4.1 3 6.5 3 C8.9 3 10.9 4.4 12 6.4 C13.1 4.4 15.1 3 17.5 3 C19.9 3 22.2 4.7 22.2 7.6 C22.2 10.5 20 15 12 21.5 Z' fill='url(#h)' stroke='#8a0010' stroke-width='1'/><ellipse cx='7.6' cy='7' rx='2.2' ry='1.3' fill='#fff' opacity='.45'/></svg>"
 };
+// ---------- Mais emoticons (mesmo estilo brilhante dos de cima) ----------
+const SVGW = (defs, corpo) => "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>" + (defs ? '<defs>' + defs + '</defs>' : '') + corpo + '</svg>';
+const GRAD = (id, cores, v) => v
+  ? "<linearGradient id='" + id + "' x1='0' y1='0' x2='0' y2='1'>" + cores.map((c, i) => "<stop offset='" + (i / (cores.length - 1)) + "' stop-color='" + c + "'/>").join('') + '</linearGradient>'
+  : "<radialGradient id='" + id + "' cx='38%' cy='30%' r='80%'>" + cores.map((c, i) => "<stop offset='" + (i / (cores.length - 1)) + "' stop-color='" + c + "'/>").join('') + '</radialGradient>';
+const TRACO = (d, cor, w) => "<path d='" + d + "' fill='none' stroke='" + (cor || '#222') + "' stroke-width='" + (w || 1.6) + "' stroke-linecap='round' stroke-linejoin='round'/>";
+const CORACAO = "M12 21.5 C4 15 1.8 10.5 1.8 7.6 C1.8 4.7 4.1 3 6.5 3 C8.9 3 10.9 4.4 12 6.4 C13.1 4.4 15.1 3 17.5 3 C19.9 3 22.2 4.7 22.2 7.6 C22.2 10.5 20 15 12 21.5 Z";
+const AMARELO = GRAD('y', ['#fffbb0', '#ffd91a', '#e09b00']);
+const BOCA_ABERTA = "<path d='M6 13.2 Q12 23 18 13.2 Z' fill='#7a1010' stroke='#222' stroke-width='1.2' stroke-linejoin='round'/><path d='M7.4 14 Q12 15.8 16.6 14' fill='none' stroke='#fff' stroke-width='1.8'/>";
+const LAGRIMA = (d) => "<path d='" + d + "' fill='#4aa3ff' stroke='#1c6fc9' stroke-width='.6'/>";
+const MINI_CORACAO = (tr) => "<path transform='" + tr + "' d='M8.3 12 C5.3 9.8 5.6 7.2 7.4 7.2 C8 7.2 8.3 7.6 8.3 8 C8.3 7.6 8.6 7.2 9.2 7.2 C11 7.2 11.3 9.8 8.3 12Z' fill='#e8112d' stroke='#8a0010' stroke-width='.5'/>";
+const RAIOS = [0, 1, 2, 3, 4, 5, 6, 7].map(i => { const a = i * Math.PI / 4, c = Math.cos(a), s = Math.sin(a); return TRACO('M' + (12 + 7.6 * c).toFixed(2) + ' ' + (12 + 7.6 * s).toFixed(2) + ' L' + (12 + 10.6 * c).toFixed(2) + ' ' + (12 + 10.6 * s).toFixed(2), '#ffb000', 1.9); }).join('');
+
+Object.assign(EMO_SVG, {
+  // ----- carinhas -----
+  '(lol)': rosto(TRACO('M5.2 10.2 Q8.2 6.4 11.2 10.2', '#222', 1.7) + TRACO('M12.8 10.2 Q15.8 6.4 18.8 10.2', '#222', 1.7) + BOCA_ABERTA +
+    LAGRIMA('M4.6 11.5 Q2.4 13 3.6 15.8 Q5.8 14.8 5.4 12.2Z') + LAGRIMA('M19.4 11.5 Q21.6 13 20.4 15.8 Q18.2 14.8 18.6 12.2Z')),
+  '(love)': rosto(MINI_CORACAO('') + MINI_CORACAO('translate(7.4 0)') + SORRISO),
+  ':*': rosto(OLHOS + "<ellipse cx='12' cy='16.3' rx='2.2' ry='1.8' fill='#e8112d' stroke='#8a0010' stroke-width='.8'/><path transform='translate(12.2 -4.4) scale(.7)' d='M8.3 12 C5.3 9.8 5.6 7.2 7.4 7.2 C8 7.2 8.3 7.6 8.3 8 C8.3 7.6 8.6 7.2 9.2 7.2 C11 7.2 11.3 9.8 8.3 12Z' fill='#ff4d6a' stroke='#8a0010' stroke-width='.6'/>"),
+  '(cry)': rosto(OLHOS + "<path d='M7.6 19 Q12 12.6 16.4 19 Z' fill='#7a1010' stroke='#222' stroke-width='1.1' stroke-linejoin='round'/>" +
+    TRACO('M7.4 11.4 Q4.8 15.4 6.2 20', '#2f8fff', 2.2) + TRACO('M16.6 11.4 Q19.2 15.4 17.8 20', '#2f8fff', 2.2)),
+  '(zzz)': rosto(TRACO('M5.8 10 Q8.3 12.2 10.8 10', '#222', 1.6) + TRACO('M13.2 10 Q15.7 12.2 18.2 10', '#222', 1.6) +
+    "<ellipse cx='12' cy='16.6' rx='1.7' ry='1.3' fill='#7a1010' stroke='#222' stroke-width='.8'/>" + TRACO('M15.4 2.2 H19.8 L15.4 6.8 H19.8', '#2060c0', 1.5)),
+  ':S': rosto("<ellipse cx='8.3' cy='9.3' rx='1.3' ry='1.7' fill='#222'/><ellipse cx='15.7' cy='9' rx='1.7' ry='2.4' fill='#222'/>" + TRACO('M6.8 16.8 Q9.4 13.8 12 16.4 T17.2 16', '#222', 1.6)),
+  '(blush)': rosto(OLHOS + "<ellipse cx='5.6' cy='13.4' rx='2.4' ry='1.6' fill='#ff5a5a' opacity='.65'/><ellipse cx='18.4' cy='13.4' rx='2.4' ry='1.6' fill='#ff5a5a' opacity='.65'/>" + TRACO('M8.8 15.8 Q12 18.4 15.2 15.8')),
+  '(devil)': rosto("<path d='M4.2 7 L3.2 1.6 L8.4 4.4Z' fill='#d02a20' stroke='#7a0f00' stroke-width='.8' stroke-linejoin='round'/><path d='M19.8 7 L20.8 1.6 L15.6 4.4Z' fill='#d02a20' stroke='#7a0f00' stroke-width='.8' stroke-linejoin='round'/>" +
+      TRACO('M5.3 7.6 L10.6 10', '#222', 1.9) + TRACO('M18.7 7.6 L13.4 10', '#222', 1.9) +
+      "<ellipse cx='8.6' cy='11.4' rx='1.1' ry='1.4' fill='#222'/><ellipse cx='15.4' cy='11.4' rx='1.1' ry='1.4' fill='#222'/>" +
+      "<path d='M6.2 15 Q12 21.4 17.8 15 Q12 17.2 6.2 15Z' fill='#222' stroke='#222' stroke-width='1' stroke-linejoin='round'/>", ['#e7b8ff', '#a64dff', '#6a1fb5', '#3d0f6b']),
+  '(angel)': rosto("<ellipse cx='12' cy='2.6' rx='5.2' ry='1.7' fill='none' stroke='#f0b400' stroke-width='1.6'/>" + OLHOS + SORRISO),
+  '(skull)': SVGW(GRAD('k', ['#ffffff', '#dcdcdc', '#9a9a9a']),
+    "<path d='M12 1.8 C6.4 1.8 3.4 5.8 3.4 10.2 C3.4 13.2 5 15 6.8 16 V19.6 C6.8 20.4 7.4 21.2 8.2 21.2 H15.8 C16.6 21.2 17.2 20.4 17.2 19.6 V16 C19 15 20.6 13.2 20.6 10.2 C20.6 5.8 17.6 1.8 12 1.8Z' fill='url(#k)' stroke='#555' stroke-width='1'/>" +
+    "<ellipse cx='8.6' cy='10.6' rx='2.5' ry='2.9' fill='#222'/><ellipse cx='15.4' cy='10.6' rx='2.5' ry='2.9' fill='#222'/><path d='M12 13.2 L10.7 15.6 H13.3Z' fill='#222'/>" +
+    TRACO('M9.6 17.2 V21 M12 17.2 V21 M14.4 17.2 V21', '#555', .9) + "<ellipse cx='7.6' cy='5.2' rx='2.6' ry='1.4' fill='#fff' opacity='.7'/>"),
+  '(sick)': rosto(TRACO('M5.8 9.6 H10.6', '#222', 1.9) + TRACO('M13.4 9.6 H18.2', '#222', 1.9) + TRACO('M6.6 17.2 Q9.3 14.4 12 17 T17.4 16.8', '#222', 1.6) +
+    "<path d='M19.2 4.6 Q21 7.2 19.2 8.4 Q17.4 7.2 19.2 4.6Z' fill='#4aa3ff' stroke='#1c6fc9' stroke-width='.5'/>", ['#eaffb8', '#a6e02a', '#6a9b00', '#3d5c00']),
+  '(roll)': rosto("<ellipse cx='8.3' cy='9.4' rx='2.4' ry='2.7' fill='#fff' stroke='#222' stroke-width='.9'/><circle cx='8.9' cy='8.2' r='1.2' fill='#222'/><ellipse cx='15.7' cy='9.4' rx='2.4' ry='2.7' fill='#fff' stroke='#222' stroke-width='.9'/><circle cx='16.3' cy='8.2' r='1.2' fill='#222'/>" + TRACO('M8 16.6 H16')),
+  '(ghost)': SVGW(GRAD('f', ['#ffffff', '#dfe6ff', '#aab6f0']),
+    "<path d='M12 1.8 C7.4 1.8 4.8 5.2 4.8 9.6 V21 L7.4 18.8 L9.7 21 L12 18.8 L14.3 21 L16.6 18.8 L19.2 21 V9.6 C19.2 5.2 16.6 1.8 12 1.8Z' fill='url(#f)' stroke='#5e6bb0' stroke-width='1' stroke-linejoin='round'/>" +
+    "<ellipse cx='9.4' cy='9.4' rx='1.3' ry='2' fill='#222'/><ellipse cx='14.6' cy='9.4' rx='1.3' ry='2' fill='#222'/><ellipse cx='12' cy='14' rx='1.5' ry='2' fill='#222'/><ellipse cx='8' cy='5' rx='2.2' ry='1.2' fill='#fff' opacity='.8'/>"),
+  '(poop)': SVGW(GRAD('p', ['#d9a05e', '#9a5a22', '#5e320e']),
+    "<ellipse cx='12' cy='18.4' rx='9' ry='3.8' fill='url(#p)' stroke='#4a2408' stroke-width='1'/><ellipse cx='12' cy='13.2' rx='6.8' ry='3.6' fill='url(#p)' stroke='#4a2408' stroke-width='1'/>" +
+    "<path d='M12.6 1.8 Q15 4 14.4 5.6 Q17 6.2 16.6 9.2 Q16 11.6 12 11.6 Q8 11.6 7.6 9.2 Q7.4 6.8 9.6 6 Q9.4 4.2 12.6 1.8Z' fill='url(#p)' stroke='#4a2408' stroke-width='1' stroke-linejoin='round'/>" +
+    "<circle cx='9.8' cy='9.4' r='1.5' fill='#fff' stroke='#4a2408' stroke-width='.5'/><circle cx='14.2' cy='9.4' r='1.5' fill='#fff' stroke='#4a2408' stroke-width='.5'/><circle cx='10' cy='9.6' r='.7' fill='#222'/><circle cx='14' cy='9.6' r='.7' fill='#222'/>" + TRACO('M10 11.4 Q12 13 14 11.4', '#2a1204', 1.1)),
+
+  // ----- coisas -----
+  '(rose)': SVGW(GRAD('r', ['#ff8a9a', '#e8112d', '#8a0010']),
+    TRACO('M12 13.6 Q12.8 18 11.2 23', '#2e8b2e', 1.9) +
+    "<path d='M12 18.4 Q16.8 17 18.4 20.4 Q14.6 21.4 12 18.4Z' fill='#3fb83f' stroke='#1f6f1f' stroke-width='.7'/><path d='M11.9 16.4 Q7.4 15.2 5.8 18.4 Q9.6 19.6 11.9 16.4Z' fill='#3fb83f' stroke='#1f6f1f' stroke-width='.7'/>" +
+    "<path d='M12 1.6 C16 1.6 18.6 4 18.4 7.6 C18.2 11.2 15.4 13.8 12 13.8 C8.6 13.8 5.8 11.2 5.8 7.6 C5.8 4 8 1.6 12 1.6Z' fill='url(#r)' stroke='#7a0010' stroke-width='1'/>" +
+    TRACO('M12.2 4 Q15.6 4.8 15 8 Q14.4 11 11.2 10.6 Q8.4 10.2 8.8 7.6 Q9.2 5.8 11.2 6 Q12.8 6.2 12.6 7.8', '#7a0010', 1)),
+  '(dog)': SVGW('',
+    "<path d='M5.6 6 Q1.4 8.4 3 15.6 Q6.8 15.2 7.8 9.8Z' fill='#8a5a2b' stroke='#4a2c10' stroke-width='.9' stroke-linejoin='round'/><path d='M18.4 6 Q22.6 8.4 21 15.6 Q17.2 15.2 16.2 9.8Z' fill='#8a5a2b' stroke='#4a2c10' stroke-width='.9' stroke-linejoin='round'/>" +
+    "<ellipse cx='12' cy='11.8' rx='7.6' ry='8.2' fill='#f3cd8c' stroke='#8a5a2b' stroke-width='1'/><ellipse cx='12' cy='15.6' rx='4.6' ry='3.8' fill='#fff1d6' stroke='#c79a5a' stroke-width='.6'/>" +
+    "<circle cx='8.8' cy='9.8' r='1.3' fill='#222'/><circle cx='15.2' cy='9.8' r='1.3' fill='#222'/><circle cx='9.2' cy='9.4' r='.4' fill='#fff'/><circle cx='15.6' cy='9.4' r='.4' fill='#fff'/><ellipse cx='12' cy='13.4' rx='2' ry='1.4' fill='#222'/>" +
+    TRACO('M12 14.6 V16.2 M12 16.2 Q10.4 17.8 9 16.6 M12 16.2 Q13.6 17.8 15 16.6', '#222', .9) + "<ellipse cx='12' cy='18.4' rx='1.3' ry='1.5' fill='#ff6f91'/><ellipse cx='8.6' cy='5.2' rx='3' ry='1.3' fill='#fff' opacity='.3'/>"),
+  '(cat)': SVGW('',
+    "<path d='M3.4 11 L4.4 2.2 L10.2 6Z' fill='#f6a64a' stroke='#a85a10' stroke-width='1' stroke-linejoin='round'/><path d='M20.6 11 L19.6 2.2 L13.8 6Z' fill='#f6a64a' stroke='#a85a10' stroke-width='1' stroke-linejoin='round'/>" +
+    "<path d='M5.4 8.4 L5.8 5 L8.4 6.8Z' fill='#ff9ab0'/><path d='M18.6 8.4 L18.2 5 L15.6 6.8Z' fill='#ff9ab0'/>" +
+    "<ellipse cx='12' cy='13.2' rx='9.2' ry='8' fill='#f6a64a' stroke='#a85a10' stroke-width='1'/>" + TRACO('M12 5.6 V8.2 M9.4 6.2 L9.9 8 M14.6 6.2 L14.1 8', '#a85a10', .9) +
+    "<ellipse cx='8.4' cy='12.2' rx='1.3' ry='1.8' fill='#222'/><ellipse cx='15.6' cy='12.2' rx='1.3' ry='1.8' fill='#222'/><circle cx='8.8' cy='11.5' r='.45' fill='#fff'/><circle cx='16' cy='11.5' r='.45' fill='#fff'/>" +
+    "<path d='M10.8 14.6 H13.2 L12 16Z' fill='#ff6f91' stroke='#b0184f' stroke-width='.4'/>" + TRACO('M12 16 Q10.6 17.6 9.2 16.8 M12 16 Q13.4 17.6 14.8 16.8', '#222', .9) +
+    TRACO('M2.2 13.4 L7 14.2 M2.4 16.6 L7.2 15.6 M21.8 13.4 L17 14.2 M21.6 16.6 L16.8 15.6', '#a85a10', .7)),
+  '(knife)': SVGW(GRAD('b', ['#ffffff', '#c9d0d8', '#8a94a0'], true),
+    "<g transform='rotate(45 12 12) translate(0 .6)'><path d='M12 -1 C15.6 2.6 16.4 8.6 15.6 14.4 H11 Z' fill='url(#b)' stroke='#59636f' stroke-width='.9' stroke-linejoin='round'/>" +
+    "<path d='M12.3 1.4 C14.2 4.4 14.6 8.6 14.2 12.6' fill='none' stroke='#fff' stroke-width='.8' opacity='.8'/>" +
+    "<rect x='10.4' y='14.2' width='5.6' height='1.6' rx='.6' fill='#b4bcc6' stroke='#59636f' stroke-width='.6'/><rect x='10.8' y='15.6' width='4.8' height='9' rx='1.6' fill='#4a2f22' stroke='#1c0f08' stroke-width='.9'/>" +
+    "<circle cx='13.2' cy='18' r='.7' fill='#c9d0d8'/><circle cx='13.2' cy='21.4' r='.7' fill='#c9d0d8'/></g>"),
+  '(mf)': SVGW(AMARELO,
+    "<path d='M5.4 13 Q5.4 11 7.4 11 H8.8 V11.4 H15.4 V11 H16.6 Q18.8 11 18.8 13.2 V17 Q18.8 22.4 13.4 22.4 H10.6 Q5.4 22.4 5.4 17Z' fill='url(#y)' stroke='#a66a00' stroke-width='1' stroke-linejoin='round'/>" +
+    "<rect x='10.2' y='1.4' width='4' height='12.4' rx='2' fill='url(#y)' stroke='#a66a00' stroke-width='1'/>" +
+    "<ellipse cx='8' cy='11.8' rx='2.2' ry='2.6' fill='url(#y)' stroke='#a66a00' stroke-width='1'/><ellipse cx='16.4' cy='12' rx='2.2' ry='2.6' fill='url(#y)' stroke='#a66a00' stroke-width='1'/>" +
+    "<path d='M5.6 15.4 Q2.8 15.6 3 18 Q3.4 20.4 7 20' fill='url(#y)' stroke='#a66a00' stroke-width='1' stroke-linecap='round'/><ellipse cx='11.6' cy='4.4' rx='.9' ry='2' fill='#fff' opacity='.45'/>"),
+  '(like)': SVGW(AMARELO + GRAD('m', ['#8fc3f4', '#3d86ea', '#1b5fd6'], true),
+    "<rect x='1.8' y='10.2' width='4.6' height='11.8' rx='1' fill='url(#m)' stroke='#12307a' stroke-width='.9'/>" +
+    "<path d='M7.8 10.6 L11.4 3.4 Q12.4 1.6 14 2.4 Q15.4 3.2 14.8 5 L13.8 8.4 H19.6 Q21.8 8.6 21.6 10.8 L20.6 18.6 Q20.2 21.4 17.6 21.4 H8.8 Q7.8 21.4 7.8 20.4Z' fill='url(#y)' stroke='#a66a00' stroke-width='1' stroke-linejoin='round'/>" +
+    TRACO('M10 13.6 H19 M9.8 16.4 H18.6', '#a66a00', .8)),
+  '(dislike)': SVGW(AMARELO + GRAD('m', ['#8fc3f4', '#3d86ea', '#1b5fd6'], true),
+    "<g transform='translate(0 24) scale(1 -1)'><rect x='1.8' y='10.2' width='4.6' height='11.8' rx='1' fill='url(#m)' stroke='#12307a' stroke-width='.9'/>" +
+    "<path d='M7.8 10.6 L11.4 3.4 Q12.4 1.6 14 2.4 Q15.4 3.2 14.8 5 L13.8 8.4 H19.6 Q21.8 8.6 21.6 10.8 L20.6 18.6 Q20.2 21.4 17.6 21.4 H8.8 Q7.8 21.4 7.8 20.4Z' fill='url(#y)' stroke='#a66a00' stroke-width='1' stroke-linejoin='round'/>" +
+    TRACO('M10 13.6 H19 M9.8 16.4 H18.6', '#a66a00', .8) + '</g>'),
+  '(broken)': SVGW(GRAD('h', ['#ff9aa8', '#e8112d', '#a00018']),
+    "<path d='" + CORACAO + "' fill='url(#h)' stroke='#8a0010' stroke-width='1'/><ellipse cx='7.6' cy='7' rx='2.2' ry='1.3' fill='#fff' opacity='.45'/>" +
+    TRACO('M12.4 5.2 L9.8 9.4 L13.8 12 L10.6 16 L12.6 20.4', '#5a0010', 2.6) + TRACO('M12.4 5.2 L9.8 9.4 L13.8 12 L10.6 16 L12.6 20.4', '#fff', 1)),
+  '(star)': SVGW(GRAD('s', ['#fffbb0', '#ffd91a', '#e09b00']),
+    "<path d='M12 1.6 L14.9 8.4 L22.2 9 L16.6 13.8 L18.4 21 L12 17.2 L5.6 21 L7.4 13.8 L1.8 9 L9.1 8.4Z' fill='url(#s)' stroke='#a66a00' stroke-width='1' stroke-linejoin='round'/><ellipse cx='9.6' cy='7.6' rx='2' ry='1' fill='#fff' opacity='.5'/>"),
+  '(moon)': SVGW(GRAD('l', ['#fffbb0', '#ffd91a', '#e09b00']),
+    "<path d='M15.6 2 A10.4 10.4 0 1 0 22 16.6 A8.6 8.6 0 0 1 15.6 2Z' fill='url(#l)' stroke='#a66a00' stroke-width='1' stroke-linejoin='round'/>"),
+  '(cake)': SVGW('',
+    "<path d='M2.8 14.2 H21.2 V20.4 Q21.2 22 19.6 22 H4.4 Q2.8 22 2.8 20.4Z' fill='#f5b07a' stroke='#b0683a' stroke-width='1'/><path d='M4.4 9 H19.6 Q20.4 9 20.4 9.8 V14.2 H3.6 V9.8 Q3.6 9 4.4 9Z' fill='#fff3f8' stroke='#d08aa8' stroke-width='1'/>" +
+    TRACO('M3.8 12 Q5.8 14.4 7.8 12 T11.8 12 T15.8 12 T19.8 12', '#e8508c', 1.4) + "<rect x='11.2' y='4.6' width='1.6' height='4.6' fill='#3d86ea' stroke='#1b5fd6' stroke-width='.5'/><path d='M12 1 Q14.2 3.4 12 5 Q9.8 3.4 12 1Z' fill='#ffb000' stroke='#e06a00' stroke-width='.5'/>"),
+  '(gift)': SVGW('',
+    "<rect x='3.4' y='9.8' width='17.2' height='12' rx='1' fill='#e8112d' stroke='#8a0010'/><rect x='2.4' y='6.8' width='19.2' height='4.2' rx='1' fill='#ff3b50' stroke='#8a0010'/><rect x='10.6' y='6.8' width='2.8' height='15' fill='#ffd91a' stroke='#a66a00' stroke-width='.6'/>" +
+    "<path d='M12 6.8 C8 6.8 6.2 1.8 9.4 2.2 C11.6 2.4 12 5 12 6.8Z' fill='#ffd91a' stroke='#a66a00' stroke-width='.7'/><path d='M12 6.8 C16 6.8 17.8 1.8 14.6 2.2 C12.4 2.4 12 5 12 6.8Z' fill='#ffd91a' stroke='#a66a00' stroke-width='.7'/>"),
+  '(beer)': SVGW(GRAD('a', ['#ffe48a', '#f6b410', '#c47c00'], true),
+    "<path d='M16.6 8.6 H19.4 Q21.6 8.6 21.6 11 V14.4 Q21.6 17 19.4 17 H16.6' fill='none' stroke='#a66a00' stroke-width='2'/>" +
+    "<path d='M4.4 6 H16.6 V19.8 Q16.6 21.8 14.6 21.8 H6.4 Q4.4 21.8 4.4 19.8Z' fill='url(#a)' stroke='#a66a00' stroke-width='1'/>" +
+    "<circle cx='6.8' cy='5.2' r='2.5' fill='#fff' stroke='#bbb' stroke-width='.7'/><circle cx='10.5' cy='3.8' r='3' fill='#fff' stroke='#bbb' stroke-width='.7'/><circle cx='14.2' cy='5.2' r='2.5' fill='#fff' stroke='#bbb' stroke-width='.7'/>" +
+    TRACO('M7.2 10 V19 M10.6 10 V19', '#fff', 1.2).replace("stroke-linecap='round'", "stroke-linecap='round' opacity='.45'")),
+  '(coffee)': SVGW('',
+    TRACO('M7.6 7 Q6 5 7.8 3.4 Q9.2 2 8 .6', '#9a9a9a', 1.1) + TRACO('M12 7 Q10.4 5 12.2 3.4 Q13.6 2 12.4 .6', '#9a9a9a', 1.1) +
+    "<path d='M16.8 11 H18.4 Q21.2 11 21.2 13.6 Q21.2 16.6 17.8 16.6 H16' fill='none' stroke='#555' stroke-width='1.6'/>" +
+    "<ellipse cx='10' cy='21.4' rx='8.4' ry='1.5' fill='#ddd' stroke='#555' stroke-width='.7'/><path d='M3.4 9.6 H16.8 V14.6 Q16.8 20.6 10.1 20.6 Q3.4 20.6 3.4 14.6Z' fill='#fff' stroke='#555' stroke-width='1'/><ellipse cx='10.1' cy='9.6' rx='6.7' ry='1.7' fill='#7a4a21' stroke='#555' stroke-width='1'/>"),
+  '(pizza)': SVGW('',
+    "<path d='M2.8 6.8 L12 22.4 L21.2 6.8 Q12 2.2 2.8 6.8Z' fill='#ffd25a' stroke='#c27a00' stroke-width='1' stroke-linejoin='round'/>" +
+    "<path d='M2.2 6.8 Q12 1.6 21.8 6.8 L20.6 9 Q12 4.6 3.4 9Z' fill='#e0a050' stroke='#a66a00' stroke-width='.9' stroke-linejoin='round'/>" +
+    "<circle cx='8.8' cy='11.6' r='1.8' fill='#d02a20' stroke='#7a0f00' stroke-width='.6'/><circle cx='14.8' cy='11.2' r='1.8' fill='#d02a20' stroke='#7a0f00' stroke-width='.6'/><circle cx='11.9' cy='16' r='1.7' fill='#d02a20' stroke='#7a0f00' stroke-width='.6'/>"),
+  '(fire)': SVGW(GRAD('fi', ['#ff3b1a', '#ff8a00', '#ffd91a'], true),
+    "<path d='M12.4 1.2 C13.2 5.2 18.6 7.6 18.6 14 C18.6 18.8 15.8 22.4 12 22.4 C8.2 22.4 5.4 18.8 5.4 14.6 C5.4 11.8 6.8 10 8.2 8.6 C8.2 10.6 9 11.6 10 11.8 C9.6 8 10.6 4 12.4 1.2Z' fill='url(#fi)' stroke='#b02000' stroke-width='.9' stroke-linejoin='round'/>" +
+    "<path d='M12 22.4 C9.8 22.4 8.4 20.4 8.4 18.2 C8.4 16.2 10 14.8 12 12.8 C14 14.8 15.6 16.2 15.6 18.2 C15.6 20.4 14.2 22.4 12 22.4Z' fill='#ffe85a'/>"),
+  '(music)': SVGW('',
+    "<ellipse cx='7.4' cy='18.4' rx='3.8' ry='2.9' fill='#2a5bd7' stroke='#12307a' stroke-width='.9' transform='rotate(-20 7.4 18.4)'/><rect x='10.4' y='3.4' width='1.7' height='14.6' fill='#2a5bd7' stroke='#12307a' stroke-width='.7'/>" +
+    "<path d='M12 3.4 C14.8 4.4 18.6 5.4 18.8 10 C17.6 7.6 15 7.2 12 6.4Z' fill='#2a5bd7' stroke='#12307a' stroke-width='.7' stroke-linejoin='round'/><ellipse cx='6.4' cy='17.4' rx='1.3' ry='.7' fill='#fff' opacity='.5'/>"),
+  '(sun)': SVGW(GRAD('u', ['#fffbb0', '#ffd91a', '#e09b00']),
+    RAIOS + "<circle cx='12' cy='12' r='5.6' fill='url(#u)' stroke='#a66a00' stroke-width='1'/><ellipse cx='10.2' cy='9.8' rx='2' ry='1.1' fill='#fff' opacity='.5'/>"),
+  '(kiss)': SVGW(GRAD('li', ['#ff8a9a', '#e8112d', '#a00018'], true),
+    "<path d='M1.8 12 Q6 4.4 9.8 7.2 Q12 8.4 14.2 7.2 Q18 4.4 22.2 12 Q12 15.6 1.8 12Z' fill='url(#li)' stroke='#7a0010' stroke-width='1' stroke-linejoin='round'/>" +
+    "<path d='M1.8 12 Q12 9 22.2 12 Q18.6 21 12 21 Q5.4 21 1.8 12Z' fill='url(#li)' stroke='#7a0010' stroke-width='1' stroke-linejoin='round'/><ellipse cx='12' cy='17.4' rx='4' ry='1.2' fill='#fff' opacity='.4'/>")
+});
+
 const EMO_URL = {};
 Object.keys(EMO_SVG).forEach(k => { EMO_URL[k] = 'data:image/svg+xml,' + encodeURIComponent(EMO_SVG[k]); });
-const EMO_CODIGOS = Object.keys(EMO_SVG).sort((a, b) => b.length - a.length);
-const RE_EMO = new RegExp(EMO_CODIGOS.map(k => esc(k).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi');
+
+// Códigos alternativos (estilo MSN antigo) que mostram o mesmo desenho
+const EMO_ALIAS = {
+  '(F)': '(rose)', '(&)': '(dog)', '(@)': '(cat)', '(Y)': '(like)', '(N)': '(dislike)',
+  '(U)': '(broken)', '(^)': '(cake)', '(K)': '(kiss)'
+};
+// Emojis do teclado do celular viram os desenhos do BIM
+const EMO_UNI = {
+  '😂': '(lol)', '🤣': '(lol)', '😍': '(love)', '🥰': '(love)', '😘': ':*', '😭': '(cry)', '😴': '(zzz)', '😕': ':S', '😟': ':S',
+  '😳': '(blush)', '😈': '(devil)', '👿': '(devil)', '😇': '(angel)', '💀': '(skull)', '☠': '(skull)', '🤢': '(sick)', '🤮': '(sick)',
+  '🙄': '(roll)', '👻': '(ghost)', '💩': '(poop)', '🌹': '(rose)', '🐶': '(dog)', '🐕': '(dog)', '🐱': '(cat)', '🐈': '(cat)',
+  '🔪': '(knife)', '🖕': '(mf)', '👍': '(like)', '👎': '(dislike)', '💔': '(broken)', '⭐': '(star)', '🌟': '(star)',
+  '🌙': '(moon)', '🎂': '(cake)', '🎁': '(gift)', '🍺': '(beer)', '🍻': '(beer)', '☕': '(coffee)', '🍕': '(pizza)',
+  '🔥': '(fire)', '🎵': '(music)', '🎶': '(music)', '☀': '(sun)', '🌞': '(sun)', '💋': '(kiss)',
+  '😀': ':)', '😃': ':D', '😄': ':D', '😁': ':D', '🙂': ':)', '😊': ':)', '😉': ';)', '😛': ':P', '😜': ':P', '😝': ':P',
+  '😮': ':O', '😲': ':O', '😢': ":'(", '😥': ":'(", '😡': ':@', '😠': ':@', '😐': ':|', '😑': ':|',
+  '❤': '<3', '♥': '<3', '💖': '<3', '😎': '(H)', '😞': ':(', '☹': ':(', '🙁': ':('
+};
+const EMO_BUSCA = {};   // texto (já escapado, minúsculo) -> código principal
+Object.keys(EMO_SVG).forEach(k => { EMO_BUSCA[esc(k).toLowerCase()] = k; });
+Object.keys(EMO_ALIAS).forEach(k => { EMO_BUSCA[esc(k).toLowerCase()] = EMO_ALIAS[k]; });
+const EMO_CODIGOS = Object.keys(EMO_SVG).concat(Object.keys(EMO_ALIAS)).sort((a, b) => b.length - a.length);
+const EMO_UNI_LISTA = Object.keys(EMO_UNI).sort((a, b) => b.length - a.length);
+// Uma única passada, para um emoji não ser trocado duas vezes
+const RE_EMO = new RegExp(
+  EMO_CODIGOS.map(k => esc(k).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') +
+  '|(?:' + EMO_UNI_LISTA.join('|') + ')\\uFE0F?', 'gi');
+function emoDe(m) {
+  m = m.replace(/\uFE0F/g, '');
+  return EMO_BUSCA[m.toLowerCase()] || EMO_UNI[m] || null;
+}
 function emoImg(k) {
   return '<img class="emo" src="' + EMO_URL[k] + '" alt="' + esc(k) + '" title="' + esc(k) + '">';
 }
@@ -715,7 +935,7 @@ function hora(t) {
 }
 function formatar(texto, fmt) {
   let h = esc(texto).replace(RE_EMO, m => {
-    const k = EMO_CODIGOS.find(c => esc(c).toLowerCase() === m.toLowerCase());
+    const k = emoDe(m);
     return k ? emoImg(k) : m;
   });
   if (fmt && fmt.b) h = '<b>' + h + '</b>';
@@ -849,6 +1069,7 @@ function ligarEnvio(c, enviar) {
 function abrirGrupo(id, semFoco) {
   const chave = 'g:' + id;
   if (chats[chave]) {
+    limparNaoLidas(chave);
     chats[chave].janela.style.zIndex = ++zTopo;
     if (!semFoco) chats[chave].input.focus();
     return chats[chave];
@@ -865,6 +1086,7 @@ function abrirGrupo(id, semFoco) {
     vistos: new Set(), fila: [], pronto: false
   };
   chats[chave] = c;
+  limparNaoLidas(chave);
   atualizarContato(c);
   ligarMenu(j, [['👥 Membros e administração', () => abrirGerenciar(id)], ['🚪 Sair do grupo', () => sairGrupo(id)]]);
   ligarBarra(j, c);
@@ -900,12 +1122,17 @@ function abrirGrupo(id, semFoco) {
 }
 
 function receberGrupo(m) {
-  const c = abrirGrupo(m.gid, true);
-  if (!c) return;
-  if (c.pronto) mostrar(c, m); else c.fila.push(m);
-  somRecebe();
-  avisarNova(c);
-  piscarAba(m.from);
+  const c = chats['g:' + m.gid];
+  if (c) {                       // conversa já aberta: só acrescenta a mensagem
+    if (c.pronto) mostrar(c, m); else c.fila.push(m);
+    somRecebe();
+    avisarNova(c);
+    piscarAba(m.from);
+    return;
+  }
+  const g = grupos.find(x => x.id === m.gid);
+  if (!g) return;
+  novaNaoLida('g:' + m.gid, '👥 ' + g.name, m.from, m.text, () => abrirGrupo(m.gid));
 }
 
 async function grupoAcao(id, acao, extra) {
@@ -1046,6 +1273,7 @@ function abrirGerenciar(id) {
 function abrirChat(nome, semFoco) {
   const chave = nome.toLowerCase();
   if (chats[chave]) {
+    limparNaoLidas(chave);
     chats[chave].janela.style.zIndex = ++zTopo;
     if (!semFoco) chats[chave].input.focus();
     return chats[chave];
@@ -1062,6 +1290,7 @@ function abrirChat(nome, semFoco) {
     vistos: new Set(), fila: [], pronto: false
   };
   chats[chave] = c;
+  limparNaoLidas(chave);
   atualizarContato(c);
 
   ligarMenu(j, [['👁 Ver perfil', () => verPerfil(c.nome)], ['🚩 Denunciar', () => denunciar(c.nome)], ['🚫 Bloquear', () => bloquear(c.nome)]]);
@@ -1116,18 +1345,97 @@ function avisarNova(c) {
   c.janela.querySelector('.titulo').classList.add('piscando');
 }
 function receber(m) {
-  const c = abrirChat(m.from, true);
-  if (c.pronto) mostrar(c, m); else c.fila.push(m);
+  const c = chats[m.from.toLowerCase()];
+  if (c) {                       // conversa já aberta: só acrescenta a mensagem
+    if (c.pronto) mostrar(c, m); else c.fila.push(m);
+    somRecebe();
+    avisarNova(c);
+    piscarAba(m.from);
+    return;
+  }
+  novaNaoLida(m.from.toLowerCase(), '💬 ' + m.from, '', m.text, () => abrirChat(m.from));
+}
+
+// ---------- Avisos de mensagem nova (pop-up, contador e título da aba) ----------
+function carregarNaoLidas() {
+  try { naoLidas = JSON.parse(localStorage.getItem('bim_nl_' + eu.toLowerCase()) || '{}') || {}; } catch (e) { naoLidas = {}; }
+}
+function salvarNaoLidas() {
+  try { localStorage.setItem('bim_nl_' + eu.toLowerCase(), JSON.stringify(naoLidas)); } catch (e) {}
+}
+function totalNaoLidas() { return Object.values(naoLidas).reduce((s, n) => s + n, 0); }
+function tituloBase() { const n = totalNaoLidas(); return n ? '(' + n + ') BIM' : 'BIM'; }
+function atualizarTituloAba() { if (!piscaTimer) document.title = tituloBase(); }
+function nomeDeChave(k) {
+  if (k.startsWith('g:')) { const g = grupos.find(x => x.id === k.slice(2)); return g ? g.name : 'grupo'; }
+  const a = amigos.find(x => x.name.toLowerCase() === k);
+  return a ? a.name : k;
+}
+function limparNaoLidas(chave) {
+  removerToast(chave);
+  if (!naoLidas[chave]) return;
+  delete naoLidas[chave];
+  salvarNaoLidas();
+  desenharLista();
+  atualizarTituloAba();
+}
+function novaNaoLida(chave, titulo, quem, texto, abrir) {
+  naoLidas[chave] = (naoLidas[chave] || 0) + 1;
+  salvarNaoLidas();
+  desenharLista();
+  atualizarTituloAba();
   somRecebe();
-  avisarNova(c);
-  piscarAba(m.from);
+  mostrarToast(chave, titulo, quem, texto, abrir);
+  notificacaoSistema(titulo, (quem ? quem + ': ' : '') + texto);
+  piscarAba(quem || titulo.replace(/^\S+\s/, ''));
+}
+const toasts = {};
+function removerToast(chave) {
+  const t = toasts[chave];
+  if (!t) return;
+  clearTimeout(t.timer);
+  t.el.remove();
+  delete toasts[chave];
+}
+function mostrarToast(chave, titulo, quem, texto, abrir) {
+  let box = $('toasts');
+  if (!box) { box = document.createElement('div'); box.id = 'toasts'; document.body.appendChild(box); }
+  removerToast(chave);
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = '<div class="titulo"><span></span><button class="btn-titulo" title="Fechar">X</button></div><div class="toast-corpo"></div>';
+  const n = naoLidas[chave] || 0;
+  el.querySelector('.titulo span').textContent = titulo + (n > 1 ? ' (' + n + ')' : '');
+  el.querySelector('.toast-corpo').innerHTML = (quem ? '<b>' + esc(quem) + ':</b> ' : '') + formatar(String(texto).slice(0, 90));
+  el.querySelector('.btn-titulo').addEventListener('click', e => { e.stopPropagation(); removerToast(chave); });
+  if (abrir) {
+    el.classList.add('clicavel');
+    el.addEventListener('click', () => { removerToast(chave); abrir(); });
+  }
+  box.appendChild(el);
+  while (box.children.length > 4) box.firstChild.remove();
+  toasts[chave] = { el, timer: setTimeout(() => removerToast(chave), 8000) };
+}
+function notificacaoSistema(titulo, corpo) {
+  try {
+    if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+      const n = new Notification(titulo, { body: String(corpo).slice(0, 120), tag: 'bim' });
+      n.onclick = () => { window.focus(); n.close(); };
+    }
+  } catch (e) {}
+}
+// Depois de reconectar, busca de novo o histórico das conversas abertas (pode ter perdido algo)
+function recarregarHistorico(c) {
+  if (!c.pronto) return;
+  const p = c.grupo ? api('grupo-historico', { id: c.id }) : api('history', { with: c.nome });
+  p.then(r => r.msgs.forEach(m => mostrar(c, m))).catch(() => {});
 }
 function piscarAba(quem) {
   if (document.hidden && !piscaTimer) {
     let alt = false;
     piscaTimer = setInterval(() => {
-      document.title = (alt = !alt) ? '💬 ' + quem + ' diz...' : 'BIM';
-      if (!document.hidden) { clearInterval(piscaTimer); piscaTimer = null; document.title = 'BIM'; }
+      document.title = (alt = !alt) ? '💬 ' + quem + ' diz...' : tituloBase();
+      if (!document.hidden) { clearInterval(piscaTimer); piscaTimer = null; document.title = tituloBase(); }
     }, 900);
   }
 }

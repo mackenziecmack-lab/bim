@@ -38,9 +38,39 @@ Sem o `nostalgia.mp3` o site funciona normalmente, só que sem música (o botão
 - Emoticons estilo MSN (`:)` `:(` `:D` `;)` `:P` `:O` `:'(` `(H)` `:@` `:|` `<3`), com botão para escolher.
 - Música de fundo bem baixinha (começa no primeiro toque na tela). O botão 🎵 no canto liga/desliga.
 
+## 4. Guardar tudo de forma permanente (grátis) - IMPORTANTE
+No plano gratuito do Render o disco é apagado sempre que o servidor reinicia ou dorme. Era isso que fazia
+contas, amigos, grupos e conversas sumirem. A solução gratuita é o Upstash (um banco de dados na nuvem):
+
+1. Crie uma conta em upstash.com e toque em "Create Database" (Redis). Nome: `bim`. Região: a mais perto
+   (ex.: São Paulo), plano Free.
+2. Na página do banco, role até a seção "REST API" e copie dois valores:
+   `UPSTASH_REDIS_REST_URL` e `UPSTASH_REDIS_REST_TOKEN`.
+3. No Render, abra seu serviço > "Environment" e adicione as duas variáveis com esses valores. Salve (o site reinicia sozinho).
+4. Pronto. Nos "Logs" do Render deve aparecer "Dados carregados do Redis" ou "Redis vazio: começando do zero".
+   A partir daí contas, amigos, grupos, mensagens e logins ficam salvos mesmo se o servidor dormir.
+
+Se as variáveis estiverem erradas o servidor se recusa a ligar (de propósito, para não apagar nada). Confira os Logs.
+Dados que já tinham sido apagados antes disso não dá para recuperar.
+
+## 5. (Opcional) Impedir que o servidor durma
+Crie uma conta grátis em uptimerobot.com, "Add New Monitor", tipo HTTP(s), URL `https://SEU-SITE.onrender.com/health`,
+intervalo de 5 minutos. Assim o site abre na hora, sem esperar 1 minuto para acordar.
+
+## O que mudou nesta versão
+- Login não cai mais: a sessão fica salva no aparelho e no servidor (90 dias). Se o servidor estiver dormindo ou a internet cair,
+  o site tenta reconectar sozinho em vez de deslogar. Você só volta para a tela de login se sair ou se a conta for suspensa.
+- Mensagem nova não abre mais a conversa na sua cara: aparece um pop-up no canto da tela (clique nele para abrir), um número
+  vermelho ao lado de quem mandou (amigo ou grupo) e o título da aba mostra "(2) BIM". Com a aba em segundo plano, o navegador
+  também pode mostrar uma notificação (ele pede permissão uma vez).
+- A seção "Grupos" agora sempre aparece na lista de amigos.
+- 33 emoticons novos no mesmo estilo dos antigos, com seletor que rola. Os emojis do teclado do celular (🐶 🌹 🔪 🖕 😂 ...)
+  também viram esses desenhos. Códigos: (lol) (love) (cry) (zzz) (blush) (devil) (angel) (skull) (sick) (roll) (ghost) (poop)
+  (rose) (dog) (cat) (knife) (mf) (like) (dislike) (broken) (star) (moon) (cake) (gift) (beer) (coffee) (pizza) (fire) (music)
+  (sun) (kiss) :* :S - e os clássicos (F) (&) (@) (Y) (N) (U) (^) (K).
+
 ## Avisos importantes
-- No plano gratuito o servidor "dorme" depois de uns minutos sem uso e demora cerca de 1 minuto para acordar no primeiro acesso.
-- No plano gratuito os arquivos do servidor são apagados quando ele reinicia ou dorme. Isso significa que contas, mensagens e denúncias podem sumir. Para guardar tudo de forma permanente é preciso um disco pago do Render (monte o disco em uma pasta, por exemplo `/dados`, e crie a variável `DB_FILE` = `/dados/data.json`) ou um banco de dados externo.
+- Sem o passo 4, os dados continuam sumindo quando o servidor reinicia.
 - Não use uma senha que você usa em outros lugares.
 - Conversas denunciadas ficam visíveis para a administradora. Vale avisar isso para quem usa o site.
 

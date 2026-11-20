@@ -24,15 +24,19 @@ const sem = (lista, chave) => lista.filter(x => minus(x) !== chave);
 const ehAdmin = chave => chave === ADMIN_KEY;
 const chaveConversa = (a, b) => [a, b].sort().join('|');
 
-// ---------- Banco de dados (arquivo JSON) ----------
-let db = { users: {}, offline: {}, msgs: {}, reports: [], nextReport: 1 };
-try { db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch (e) {}
-db.users = db.users || {};
-db.offline = db.offline || {};
-db.msgs = db.msgs || {};
-db.reports = db.reports || [];
-db.nextReport = db.nextReport || 1;
-db.groups = db.groups || {};
+// ---------- Banco de dados ----------
+// Onde os dados ficam guardados:
+//  1) Upstash Redis (gratuito e permanente), se UPSTASH_REDIS_REST_URL e UPSTASH_REDIS_REST_TOKEN existirem
+//  2) arquivo JSON (DB_FILE) - no plano grátis do Render ele é apagado quando o servidor reinicia/dorme
+const REDIS_URL = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/+$/, '');
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const USA_REDIS = !!(REDIS_URL && REDIS_TOKEN);
+const PREFIXO = 'bim:';
+const VALIDADE_SESSAO = 90 * 24 * 3600 * 1000; // 90 dias
+
+let db = { users: {}, offline: {}, msgs: {}, reports: [], nextReport: 1, groups: {}, sessions: {} };
+const sessions = new Map();     // token -> { k: chave, t: último uso }
+const ultimoSalvo = new Map();  // chave do Redis -> texto já salvo
 
 function guardarMsg(deChave, paraChave, text, fmt, t) {
   const k = chaveConversa(deChave, paraChave);
@@ -41,38 +45,170 @@ function guardarMsg(deChave, paraChave, text, fmt, t) {
   if (l.length > 300) l.splice(0, l.length - 300);
 }
 
-// Migração de contas/dados de versões antigas
-Object.values(db.users).forEach(u => {
-  u.buddies = u.buddies || [];
-  u.requests = u.requests || [];
-  u.blocked = u.blocked || [];
-  u.bio = u.bio || '';
-  u.avatar = u.avatar || '';
-  u.theme = TEMAS.includes(u.theme) ? u.theme : 'azul';
-});
-for (const k of Object.keys(db.offline)) {
-  const nomes = new Set();
-  (db.offline[k] || []).forEach(m => {
-    if (typeof m === 'string') return nomes.add(m);
-    nomes.add(m.from);
-    guardarMsg(minus(m.from), k, m.text, m.fmt, m.t);
-  });
-  db.offline[k] = [...nomes];
+function carregarArquivo() {
+  let texto;
+  try { texto = fs.readFileSync(DB_FILE, 'utf8'); } catch (e) { return false; }
+  try { db = JSON.parse(texto); return true; }
+  catch (e) {
+    // Nunca sobrescreve um arquivo ilegível sem guardar uma cópia antes
+    const bkp = DB_FILE + '.corrompido-' + Date.now();
+    try { fs.writeFileSync(bkp, texto); } catch (e2) {}
+    console.log('AVISO: arquivo de dados ilegível. Cópia guardada em ' + bkp);
+    return false;
+  }
 }
 
-let salvando = false;
+// Migração / normalização dos dados (versões antigas e campos que faltam)
+function normalizarDb() {
+  const TEMAS_OK = ['azul', 'rosa', 'verde', 'vermelho', 'laranja', 'preto', 'branco'];
+  db.users = db.users || {};
+  db.offline = db.offline || {};
+  db.msgs = db.msgs || {};
+  db.reports = db.reports || [];
+  db.nextReport = db.nextReport || 1;
+  db.groups = db.groups || {};
+  db.sessions = db.sessions || {};
+  Object.values(db.users).forEach(u => {
+    u.buddies = u.buddies || [];
+    u.requests = u.requests || [];
+    u.blocked = u.blocked || [];
+    u.bio = u.bio || '';
+    u.avatar = u.avatar || '';
+    u.theme = TEMAS_OK.includes(u.theme) ? u.theme : 'azul';
+  });
+  for (const k of Object.keys(db.offline)) {
+    const nomes = new Set();
+    (db.offline[k] || []).forEach(m => {
+      if (typeof m === 'string') return nomes.add(m);
+      nomes.add(m.from);
+      guardarMsg(minus(m.from), k, m.text, m.fmt, m.t);
+    });
+    db.offline[k] = [...nomes];
+  }
+  // Sessões salvas (assim ninguém é deslogado quando o servidor reinicia)
+  const agora = Date.now();
+  for (const [token, s] of Object.entries(db.sessions)) {
+    const sess = typeof s === 'string' ? { k: s, t: agora } : s;
+    if (sess && db.users[sess.k] && agora - sess.t < VALIDADE_SESSAO) sessions.set(token, sess);
+  }
+}
+
+// ----- Redis (Upstash, via REST) -----
+async function redis(cmds) {
+  const r = await fetch(REDIS_URL + '/pipeline', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + REDIS_TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify(cmds)
+  });
+  if (!r.ok) throw new Error('Redis respondeu HTTP ' + r.status);
+  const saida = await r.json();
+  const erro = saida.find(x => x && x.error);
+  if (erro) throw new Error(erro.error);
+  return saida.map(x => x.result);
+}
+
+function sincronizarSessoes() { db.sessions = Object.fromEntries(sessions); }
+
+// Divide o banco em pedaços pequenos: meta, um por usuário e um por conversa
+function partes() {
+  sincronizarSessoes();
+  const m = new Map();
+  m.set(PREFIXO + 'meta', JSON.stringify({
+    reports: db.reports, nextReport: db.nextReport, groups: db.groups,
+    offline: db.offline, sessions: db.sessions
+  }));
+  for (const [k, u] of Object.entries(db.users)) m.set(PREFIXO + 'u:' + k, JSON.stringify(u));
+  for (const [k, l] of Object.entries(db.msgs)) m.set(PREFIXO + 'm:' + k, JSON.stringify(l));
+  return m;
+}
+
+async function carregarRedis() {
+  const [chaves] = await redis([['KEYS', PREFIXO + '*']]);
+  if (!chaves.length) return false;
+  const novo = { users: {}, offline: {}, msgs: {}, reports: [], nextReport: 1, groups: {}, sessions: {} };
+  for (let i = 0; i < chaves.length; i += 40) {
+    const lote = chaves.slice(i, i + 40);
+    const [valores] = await redis([['MGET'].concat(lote)]);
+    lote.forEach((k, j) => {
+      if (valores[j] == null) return;
+      const obj = JSON.parse(valores[j]);
+      const nome = k.slice(PREFIXO.length);
+      if (nome === 'meta') Object.assign(novo, obj);
+      else if (nome.startsWith('u:')) novo.users[nome.slice(2)] = obj;
+      else if (nome.startsWith('m:')) novo.msgs[nome.slice(2)] = obj;
+      ultimoSalvo.set(k, valores[j]);
+    });
+  }
+  db = novo;
+  return true;
+}
+
+let redisOcupado = false, redisRepetir = false;
+async function salvarRedis() {
+  if (redisOcupado) { redisRepetir = true; return; }
+  redisOcupado = true;
+  try {
+    do {
+      redisRepetir = false;
+      const atual = partes();
+      const cmds = [];
+      for (const [k, v] of atual) if (ultimoSalvo.get(k) !== v) cmds.push({ c: ['SET', k, v], k, v });
+      for (const k of ultimoSalvo.keys()) if (!atual.has(k)) cmds.push({ c: ['DEL', k], k, v: null });
+      let lote = [], tam = 0;
+      const enviar = async () => {
+        if (!lote.length) return;
+        await redis(lote.map(x => x.c));
+        lote.forEach(x => x.v === null ? ultimoSalvo.delete(x.k) : ultimoSalvo.set(x.k, x.v));
+        lote = []; tam = 0;
+      };
+      for (const x of cmds) {
+        const t = x.c.reduce((s, p) => s + String(p).length, 0);
+        if (lote.length && tam + t > 700000) await enviar();
+        lote.push(x); tam += t;
+      }
+      await enviar();
+    } while (redisRepetir);
+  } catch (e) {
+    console.log('Erro ao salvar no Redis (vou tentar de novo):', e.message);
+    setTimeout(salvar, 10000);
+  } finally {
+    redisOcupado = false;
+  }
+}
+
+function gravarArquivoSync() {
+  sincronizarSessoes();
+  try {
+    const tmp = DB_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(db));
+    fs.renameSync(tmp, DB_FILE);
+  } catch (e) {}
+}
+
+let agendado = null;
 function salvar() {
-  if (salvando) return;
-  salvando = true;
-  setTimeout(() => {
-    salvando = false;
+  if (agendado) return;
+  agendado = setTimeout(async () => {
+    agendado = null;
+    sincronizarSessoes();
     const tmp = DB_FILE + '.tmp';
     fs.writeFile(tmp, JSON.stringify(db), e => { if (!e) fs.rename(tmp, DB_FILE, () => {}); });
-  }, 300);
+    if (USA_REDIS) await salvarRedis();
+  }, USA_REDIS ? 1500 : 300);
 }
 
+let encerrando = false;
+async function encerrar() {
+  if (encerrando) return;
+  encerrando = true;
+  gravarArquivoSync();
+  if (USA_REDIS) await Promise.race([salvarRedis(), new Promise(r => setTimeout(r, 6000))]);
+  process.exit(0);
+}
+process.on('SIGTERM', encerrar);
+process.on('SIGINT', encerrar);
+
 // ---------- Estado em memória ----------
-const sessions = new Map();     // token -> chave (nome minúsculo)
 const online = new Map();       // chave -> { clients:Set<res>, away:string, key }
 const tentativas = new Map();   // ip -> timestamps (login/cadastro)
 const envios = new Map();       // chave -> timestamps (mensagens)
@@ -96,8 +232,18 @@ function igual(a, b) {
 }
 function criarSessao(chave) {
   const token = crypto.randomBytes(24).toString('hex');
-  sessions.set(token, chave);
+  sessions.set(token, { k: chave, t: Date.now() });
+  // no máximo 10 sessões por conta (apaga as mais antigas)
+  const dela = [...sessions].filter(([, s]) => s.k === chave).sort((a, b) => a[1].t - b[1].t);
+  while (dela.length > 10) sessions.delete(dela.shift()[0]);
+  salvar();
   return token;
+}
+function sessaoChave(token) {
+  const s = sessions.get(token);
+  if (!s) return undefined;
+  if (Date.now() - s.t > VALIDADE_SESSAO) { sessions.delete(token); return undefined; }
+  return s.k;
 }
 
 // ---------- Respostas / eventos ----------
@@ -185,7 +331,7 @@ function denunciasAbertas() { return db.reports.filter(r => r.status === 'aberta
 
 // Encerra sessões e conexões de uma conta (usado ao banir)
 function derrubar(chave) {
-  for (const [t, k] of sessions) if (k === chave) sessions.delete(t);
+  for (const [t, s] of sessions) if (s.k === chave) sessions.delete(t);
   const o = online.get(chave);
   if (o) {
     online.delete(chave);
@@ -198,7 +344,7 @@ function derrubar(chave) {
 function migrarChave(velha, nova, nome) {
   db.users[nova] = db.users[velha];
   delete db.users[velha];
-  for (const [t, k] of sessions) if (k === velha) sessions.set(t, nova);
+  for (const [t, s] of sessions) if (s.k === velha) s.k = nova;
   const o = online.get(velha);
   if (o) { online.delete(velha); online.set(nova, o); o.key = nova; }
   if (db.offline[velha]) { db.offline[nova] = db.offline[velha]; delete db.offline[velha]; }
@@ -280,9 +426,17 @@ const servidor = http.createServer(async (req, res) => {
       return servirArquivo(req, res, arq, tipo);
     }
 
+    // Verificação simples (usada para manter o servidor acordado e para o app saber se a sessão ainda vale)
+    if (req.method === 'GET' && url.pathname === '/health') { res.writeHead(200); return res.end('ok'); }
+    if (req.method === 'GET' && url.pathname === '/api/sessao') {
+      const k = sessaoChave(url.searchParams.get('token'));
+      if (!k || !db.users[k] || db.users[k].banned) return responder(res, 401, { ok: false });
+      return responder(res, 200, { ok: true });
+    }
+
     // Fluxo em tempo real
     if (req.method === 'GET' && url.pathname === '/api/stream') {
-      const chave = sessions.get(url.searchParams.get('token'));
+      const chave = sessaoChave(url.searchParams.get('token'));
       if (!chave || !db.users[chave] || db.users[chave].banned) { res.writeHead(401); return res.end(); }
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -290,6 +444,8 @@ const servidor = http.createServer(async (req, res) => {
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no'
       });
+      const sess = sessions.get(url.searchParams.get('token'));
+      if (sess) sess.t = Date.now(); // renova a validade
       let o = online.get(chave);
       const primeira = !o;
       if (!o) { o = { clients: new Set(), away: '', key: chave }; online.set(chave, o); }
@@ -364,7 +520,7 @@ const servidor = http.createServer(async (req, res) => {
     }
 
     // Rotas autenticadas
-    const chave = sessions.get(req.headers['x-token']);
+    const chave = sessaoChave(req.headers['x-token']);
     if (!chave || !db.users[chave] || db.users[chave].banned) return responder(res, 401, { erro: 'Sessão expirada.' });
     const eu = db.users[chave];
 
@@ -389,7 +545,7 @@ const servidor = http.createServer(async (req, res) => {
         return responder(res, 200, { ok: true, msg, away: o.away });
       }
       const fila = db.offline[paraChave] = db.offline[paraChave] || [];
-      if (!tem(fila, chave)) fila.push(eu.name);
+      if (fila.length < 200) fila.push(eu.name); // uma entrada por mensagem (o site mostra a contagem)
       salvar();
       return responder(res, 200, { ok: true, msg, offline: true });
     }
@@ -666,7 +822,7 @@ const servidor = http.createServer(async (req, res) => {
         if (m === chave || !u || tem(u.blocked, chave)) return;
         if (online.has(m)) return empurrar(m, 'gmsg', msg);
         const fila = db.offline[m] = db.offline[m] || [];
-        if (!fila.includes('#' + g.id)) fila.push('#' + g.id);
+        if (fila.length < 200) fila.push('#' + g.id);
       });
       salvar();
       return responder(res, 200, { ok: true, msg });
@@ -688,6 +844,7 @@ const servidor = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/logout') {
       sessions.delete(req.headers['x-token']);
+      salvar();
       return responder(res, 200, { ok: true });
     }
 
@@ -697,7 +854,31 @@ const servidor = http.createServer(async (req, res) => {
   }
 });
 
-servidor.listen(PORT, () => {
-  console.log('BIM rodando em http://localhost:' + PORT);
-  if (!CODIGO_ADMIN) console.log('Aviso: defina CODIGO_ADMIN para poder criar a conta ' + ADMIN_NOME + '.');
-});
+async function iniciar() {
+  if (USA_REDIS) {
+    try {
+      const achou = await carregarRedis();
+      if (!achou) {
+        // Redis vazio: se houver arquivo antigo, aproveita; senão começa do zero
+        if (carregarArquivo()) console.log('Dados do arquivo copiados para o Redis.');
+        else console.log('Redis vazio: começando do zero.');
+      } else {
+        console.log('Dados carregados do Redis.');
+      }
+    } catch (e) {
+      // Não sobe com banco vazio: isso apagaria tudo no próximo salvamento
+      console.log('ERRO: não consegui ler o Redis (' + e.message + '). Confira as variáveis UPSTASH_*.');
+      process.exit(1);
+    }
+  } else {
+    carregarArquivo();
+    console.log('Aviso: guardando dados só em arquivo. No Render grátis eles somem quando o servidor reinicia (veja o LEIA-ME).');
+  }
+  normalizarDb();
+  if (USA_REDIS) salvar();
+  servidor.listen(PORT, () => {
+    console.log('BIM rodando em http://localhost:' + PORT);
+    if (!CODIGO_ADMIN) console.log('Aviso: defina CODIGO_ADMIN para poder criar a conta ' + ADMIN_NOME + '.');
+  });
+}
+iniciar();
