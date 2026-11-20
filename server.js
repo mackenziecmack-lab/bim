@@ -231,8 +231,7 @@ const ESTATICOS = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/index.html': ['index.html', 'text/html; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
-  '/script.js': ['script.js', 'application/javascript; charset=utf-8'],
-  '/nostalgia.mp3': ['nostalgia.mp3', 'audio/mpeg']
+  '/script.js': ['script.js', 'application/javascript; charset=utf-8']
 };
 function servirArquivo(req, res, arq, tipo) {
   const caminho = path.join(__dirname, arq);
@@ -264,6 +263,18 @@ const servidor = http.createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
 
   try {
+    if (req.method === 'GET' && url.pathname === '/nostalgia.mp3') {
+      // Acha o arquivo de música, não importa o nome exato (ex.: "Nostalgia - Votabias(720P_HD).mp4")
+      const tipos = { mp3: 'audio/mpeg', m4a: 'audio/mp4', mp4: 'video/mp4', webm: 'video/webm', ogg: 'audio/ogg', wav: 'audio/wav' };
+      let achado = null;
+      try {
+        achado = fs.readdirSync(__dirname).find(f => /^nostalgia.*\.(mp3|m4a|mp4|webm|ogg|wav)$/i.test(f));
+      } catch (e) {}
+      if (!achado) { res.writeHead(404); return res.end('Música não encontrada'); }
+      const ext = achado.split('.').pop().toLowerCase();
+      return servirArquivo(req, res, achado, tipos[ext]);
+    }
+
     if (req.method === 'GET' && ESTATICOS[url.pathname]) {
       const [arq, tipo] = ESTATICOS[url.pathname];
       return servirArquivo(req, res, arq, tipo);
