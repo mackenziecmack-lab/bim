@@ -4,9 +4,16 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>BIM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;700&display=swap">
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="tema-azul">
+
+  <!-- Música de fundo (coloque o arquivo nostalgia.mp3 junto dos outros arquivos) -->
+  <audio id="musica" src="nostalgia.mp3" loop preload="auto"></audio>
+  <button class="botao" id="btn-musica" title="Música ligada/desligada">🎵</button>
 
   <!-- Janela de login / cadastro -->
   <div class="janela" id="login-win" style="left:50%;top:50%;transform:translate(-50%,-50%);width:290px">
@@ -29,6 +36,11 @@
         <input class="entrada" type="password" id="f-pass2" autocomplete="new-password">
       </div>
 
+      <div id="linha-codigo" class="escondido">
+        <label for="f-codigo">Código de administrador</label>
+        <input class="entrada" type="password" id="f-codigo" autocomplete="off">
+      </div>
+
       <div class="botoes-login">
         <button class="botao" id="btn-principal">Entrar</button>
       </div>
@@ -40,23 +52,32 @@
   </div>
 
   <!-- Lista de amigos -->
-  <div class="janela escondido" id="lista-win" style="left:30px;top:30px;width:240px;height:460px">
+  <div class="janela escondido" id="lista-win" style="left:30px;top:30px;width:270px;height:540px">
     <div class="titulo"><span id="lista-titulo">Lista de Amigos</span></div>
     <div class="corpo lista-corpo">
       <div class="menubar"><span>Pessoas</span><span>Ver</span><span>Ajuda</span></div>
       <div class="perfil">
-        <div class="avatar">🙂</div>
-        <div>
+        <div class="avatar" id="meu-avatar">🙂</div>
+        <div class="perfil-info">
           <strong id="meu-nome"></strong><br>
           <small id="meu-estado">Disponível</small>
+          <small id="minha-bio" class="bio"></small>
         </div>
       </div>
       <div class="amigos entrada-inset" id="amigos"></div>
-      <div class="lista-botoes">
-        <button class="botao" id="btn-add" title="Adicionar amigo">➕ Adicionar</button>
+      <div class="lista-botoes lista-acoes">
+        <button class="botao" id="btn-ver" title="Ver perfil do amigo selecionado">👁 Perfil</button>
+        <button class="botao" id="btn-bloq" title="Bloquear o amigo selecionado">🚫 Bloquear</button>
+        <button class="botao" id="btn-denun" title="Denunciar o amigo selecionado">🚩 Denunciar</button>
         <button class="botao" id="btn-del" title="Remover amigo selecionado">➖ Remover</button>
+      </div>
+      <div class="lista-botoes">
+        <button class="botao" id="btn-add" title="Enviar pedido de amizade">➕ Adicionar</button>
+        <button class="botao" id="btn-pedidos" title="Pedidos de amizade">📨 Pedidos</button>
+        <button class="botao" id="btn-perfil" title="Editar meu perfil">👤 Meu perfil</button>
         <button class="botao" id="btn-away">🌙 Ausente</button>
         <button class="botao" id="btn-som">🔊</button>
+        <button class="botao escondido" id="btn-denuncias">🛡 Denúncias</button>
         <button class="botao" id="btn-sair">Sair</button>
       </div>
     </div>
