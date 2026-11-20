@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BIM</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Janela de login / cadastro -->
+  <div class="janela" id="login-win" style="left:50%;top:50%;transform:translate(-50%,-50%);width:290px">
+    <div class="titulo"><span id="login-titulo">Entrar - BIM</span></div>
+    <div class="corpo login-corpo">
+      <div class="marca">
+        <div class="marca-icone">💬</div>
+        <div class="marca-nome">B<span>I</span>M</div>
+        <div class="marca-sub">Mensageiro Instantâneo</div>
+      </div>
+
+      <label for="f-user">Nome de usuário</label>
+      <input class="entrada" type="text" id="f-user" maxlength="16" autocomplete="username" spellcheck="false">
+
+      <label for="f-pass">Senha</label>
+      <input class="entrada" type="password" id="f-pass" autocomplete="current-password">
+
+      <div id="linha-confirma" class="escondido">
+        <label for="f-pass2">Confirmar senha</label>
+        <input class="entrada" type="password" id="f-pass2" autocomplete="new-password">
+      </div>
+
+      <div class="botoes-login">
+        <button class="botao" id="btn-principal">Entrar</button>
+      </div>
+      <div class="troca">
+        <a href="#" id="link-troca">Não tem um nome? Cadastre-se grátis!</a>
+      </div>
+      <div class="status-login" id="status-login"></div>
+    </div>
+  </div>
+
+  <!-- Lista de amigos -->
+  <div class="janela escondido" id="lista-win" style="left:30px;top:30px;width:240px;height:460px">
+    <div class="titulo"><span id="lista-titulo">Lista de Amigos</span></div>
+    <div class="corpo lista-corpo">
+      <div class="menubar"><span>Pessoas</span><span>Ver</span><span>Ajuda</span></div>
+      <div class="perfil">
+        <div class="avatar">🙂</div>
+        <div>
+          <strong id="meu-nome"></strong><br>
+          <small id="meu-estado">Disponível</small>
+        </div>
+      </div>
+      <div class="amigos entrada-inset" id="amigos"></div>
+      <div class="lista-botoes">
+        <button class="botao" id="btn-add" title="Adicionar amigo">➕ Adicionar</button>
+        <button class="botao" id="btn-del" title="Remover amigo selecionado">➖ Remover</button>
+        <button class="botao" id="btn-away">🌙 Ausente</button>
+        <button class="botao" id="btn-som">🔊</button>
+        <button class="botao" id="btn-sair">Sair</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="janelas-chat"></div>
+
+  <script src="script.js"></script>
+</body>
+</html>
