@@ -34,6 +34,7 @@ Sem o `nostalgia.mp3` o site funciona normalmente, só que sem música (o botão
 - Mensagens ficam salvas (últimas 300 de cada conversa) e aparecem quando a conversa é aberta.
 - Pedidos de amizade: a pessoa aceita ou recusa em "📨 Pedidos". Também dá para bloquear e denunciar.
 - Meu perfil: foto, bio, mudar nome de usuário e escolher a cor do site (azul, rosa, verde, vermelho, laranja, preto, branco).
+- Grupos: botão "👥 Novo grupo". Quem cria vira dona e administradora; administradores adicionam amigos, removem membros, promovem outros e renomeiam. Só a dona rebaixa administradores e exclui o grupo. Quem quiser pode sair a qualquer momento.
 - Emoticons estilo MSN (`:)` `:(` `:D` `;)` `:P` `:O` `:'(` `(H)` `:@` `:|` `<3`), com botão para escolher.
 - Música de fundo bem baixinha (começa no primeiro toque na tela). O botão 🎵 no canto liga/desliga.
 

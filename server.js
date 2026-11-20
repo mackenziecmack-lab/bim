@@ -32,6 +32,7 @@ db.offline = db.offline || {};
 db.msgs = db.msgs || {};
 db.reports = db.reports || [];
 db.nextReport = db.nextReport || 1;
+db.groups = db.groups || {};
 
 function guardarMsg(deChave, paraChave, text, fmt, t) {
   const k = chaveConversa(deChave, paraChave);
@@ -151,6 +152,21 @@ function avisarPresenca(chave) {
     if (u && tem(u.buddies, chave)) empurrar(k, 'presence', st);
   }
 }
+function grupoPublico(g) {
+  return {
+    id: g.id, name: g.name, dono: nomeDe(g.dono),
+    members: g.members.map(k => {
+      const st = statusDe(nomeDe(k));
+      return { name: st.name, avatar: st.avatar, online: st.online, admin: g.admins.includes(k) };
+    })
+  };
+}
+function gruposDe(chave) {
+  return Object.values(db.groups).filter(g => g.members.includes(chave)).map(grupoPublico);
+}
+function enviarGrupos(chave) {
+  if (db.users[chave] && online.has(chave)) empurrar(chave, 'groups', gruposDe(chave));
+}
 function aceitar(a, b) {
   const ua = db.users[a], ub = db.users[b];
   ua.requests = sem(ua.requests, b);
@@ -195,6 +211,14 @@ function migrarChave(velha, nova, nome) {
     delete db.msgs[k];
     lista.forEach(m => { if (m.f === velha) m.f = nova; });
     db.msgs[novoK] = lista;
+  }
+  Object.values(db.groups).forEach(g => {
+    g.members = g.members.map(x => x === velha ? nova : x);
+    g.admins = g.admins.map(x => x === velha ? nova : x);
+    if (g.dono === velha) g.dono = nova;
+  });
+  for (const k of Object.keys(db.msgs)) {
+    if (k.startsWith('g:')) db.msgs[k].forEach(m => { if (m.f === velha) m.f = nova; });
   }
   db.reports.forEach(r => {
     if (r.deKey === velha) { r.deKey = nova; r.de = nome; }
@@ -266,6 +290,7 @@ const servidor = http.createServer(async (req, res) => {
         admin: ehAdmin(chave),
         abertas: ehAdmin(chave) ? denunciasAbertas() : 0,
         buddies: l.buddies, requests: l.requests, blocked: l.blocked,
+        groups: gruposDe(chave),
         unread: db.offline[chave] || []
       });
       delete db.offline[chave];
@@ -480,12 +505,20 @@ const servidor = http.createServer(async (req, res) => {
       if (alvoChave === chave) return responder(res, 400, { erro: 'Você não pode denunciar a si mesmo.' });
       const motivo = String(b.motivo || '').replace(/\s+/g, ' ').trim().slice(0, 200);
       if (!motivo) return responder(res, 400, { erro: 'Escreva o motivo da denúncia.' });
-      const conversa = (db.msgs[chaveConversa(chave, alvoChave)] || []).slice(-60)
-        .map(m => ({ from: nomeDe(m.f), text: m.text, t: m.t }));
+      let lista, grupoNome = '';
+      if (b.grupo) {
+        const gr = db.groups[String(b.grupo)];
+        if (!gr || !gr.members.includes(chave) || !gr.members.includes(alvoChave)) return responder(res, 400, { erro: 'Grupo inválido.' });
+        lista = db.msgs['g:' + gr.id] || [];
+        grupoNome = gr.name;
+      } else {
+        lista = db.msgs[chaveConversa(chave, alvoChave)] || [];
+      }
+      const conversa = lista.slice(-60).map(m => ({ from: nomeDe(m.f), text: m.text, t: m.t }));
       db.reports.push({
         id: db.nextReport++, t: Date.now(), status: 'aberta',
         de: eu.name, deKey: chave, alvo: alvo.name, alvoKey: alvoChave,
-        motivo, conversa
+        motivo, conversa, grupo: grupoNome
       });
       if (db.reports.length > 1000) db.reports.shift();
       salvar();
@@ -521,6 +554,119 @@ const servidor = http.createServer(async (req, res) => {
       }
       salvar();
       return responder(res, 200, { ok: true, abertas: denunciasAbertas() });
+    }
+
+    // ---- Grupos ----
+    if (url.pathname === '/api/grupo-criar') {
+      const nome = String(b.name || '').replace(/\s+/g, ' ').trim().slice(0, 24);
+      if (nome.length < 2) return responder(res, 400, { erro: 'Dê um nome ao grupo (2 a 24 caracteres).' });
+      if (Object.values(db.groups).filter(g => g.members.includes(chave)).length >= 20) return responder(res, 400, { erro: 'Limite de 20 grupos.' });
+      const membros = [chave];
+      (Array.isArray(b.members) ? b.members : []).slice(0, 29).forEach(n => {
+        const k = minus(n);
+        const u = db.users[k];
+        if (u && k !== chave && !membros.includes(k) && tem(eu.buddies, k) && !tem(u.blocked, chave)) membros.push(k);
+      });
+      const id = crypto.randomBytes(4).toString('hex');
+      const g = db.groups[id] = { id, name: nome, members: membros, admins: [chave], dono: chave, created: Date.now() };
+      salvar();
+      g.members.forEach(enviarGrupos);
+      return responder(res, 200, { ok: true, id, grupos: gruposDe(chave) });
+    }
+
+    if (url.pathname === '/api/grupo-acao') {
+      const g = db.groups[String(b.id || '')];
+      if (!g || !g.members.includes(chave)) return responder(res, 404, { erro: 'Grupo não encontrado.' });
+      const souAdm = g.admins.includes(chave);
+      const souDono = g.dono === chave;
+      const alvoChave = minus(b.name || '');
+      const alvo = db.users[alvoChave];
+      const afetados = g.members.slice();
+      const negar = () => responder(res, 403, { erro: 'Só administradores podem fazer isso.' });
+      switch (b.acao) {
+        case 'add':
+          if (!souAdm) return negar();
+          if (!alvo) return responder(res, 404, { erro: 'Usuário não encontrado.' });
+          if (g.members.includes(alvoChave)) return responder(res, 400, { erro: 'Essa pessoa já está no grupo.' });
+          if (g.members.length >= 30) return responder(res, 400, { erro: 'Limite de 30 membros.' });
+          if (!tem(eu.buddies, alvoChave) || tem(alvo.blocked, chave)) return responder(res, 400, { erro: 'Você só pode adicionar seus amigos.' });
+          g.members.push(alvoChave);
+          afetados.push(alvoChave);
+          break;
+        case 'remove':
+          if (!souAdm) return negar();
+          if (alvoChave === chave || !g.members.includes(alvoChave)) return responder(res, 400, { erro: 'Membro inválido.' });
+          if (g.admins.includes(alvoChave) && !souDono) return responder(res, 403, { erro: 'Só a dona do grupo remove administradores.' });
+          if (alvoChave === g.dono) return responder(res, 403, { erro: 'Não dá para remover a dona do grupo.' });
+          g.members = g.members.filter(k => k !== alvoChave);
+          g.admins = g.admins.filter(k => k !== alvoChave);
+          break;
+        case 'promote':
+          if (!souAdm) return negar();
+          if (!g.members.includes(alvoChave)) return responder(res, 400, { erro: 'Membro inválido.' });
+          if (!g.admins.includes(alvoChave)) g.admins.push(alvoChave);
+          break;
+        case 'demote':
+          if (!souDono) return responder(res, 403, { erro: 'Só a dona do grupo pode tirar um administrador.' });
+          if (alvoChave === g.dono || !g.members.includes(alvoChave)) return responder(res, 400, { erro: 'Membro inválido.' });
+          g.admins = g.admins.filter(k => k !== alvoChave);
+          break;
+        case 'rename': {
+          if (!souAdm) return negar();
+          const nome = String(b.novoNome || '').replace(/\s+/g, ' ').trim().slice(0, 24);
+          if (nome.length < 2) return responder(res, 400, { erro: 'Nome muito curto.' });
+          g.name = nome;
+          break;
+        }
+        case 'leave':
+          g.members = g.members.filter(k => k !== chave);
+          g.admins = g.admins.filter(k => k !== chave);
+          if (!g.members.length) { delete db.groups[g.id]; delete db.msgs['g:' + g.id]; break; }
+          if (!g.admins.length) g.admins.push(g.members[0]);
+          if (g.dono === chave) g.dono = g.admins[0];
+          break;
+        case 'delete':
+          if (!souDono) return responder(res, 403, { erro: 'Só a dona do grupo pode excluir.' });
+          delete db.groups[g.id];
+          delete db.msgs['g:' + g.id];
+          break;
+        default:
+          return responder(res, 400, { erro: 'Ação inválida.' });
+      }
+      salvar();
+      afetados.forEach(enviarGrupos);
+      return responder(res, 200, { ok: true, grupos: gruposDe(chave) });
+    }
+
+    if (url.pathname === '/api/grupo-enviar') {
+      if (limite(envios, chave, 20, 10000)) return responder(res, 429, { erro: 'Calma! Você está enviando rápido demais.' });
+      const g = db.groups[String(b.id || '')];
+      if (!g || !g.members.includes(chave)) return responder(res, 404, { erro: 'Grupo não encontrado.' });
+      const texto = String(b.text || '').trim().slice(0, 500);
+      if (!texto) return responder(res, 400, { erro: 'Mensagem vazia.' });
+      const f = b.fmt || {};
+      const msg = { gid: g.id, from: eu.name, text: texto, fmt: { b: !!f.b, i: !!f.i, u: !!f.u }, t: Date.now() };
+      const k = 'g:' + g.id;
+      const l = db.msgs[k] = db.msgs[k] || [];
+      l.push({ f: chave, text: msg.text, fmt: msg.fmt, t: msg.t });
+      if (l.length > 300) l.splice(0, l.length - 300);
+      g.members.forEach(m => {
+        const u = db.users[m];
+        if (m === chave || !u || tem(u.blocked, chave)) return;
+        if (online.has(m)) return empurrar(m, 'gmsg', msg);
+        const fila = db.offline[m] = db.offline[m] || [];
+        if (!fila.includes('#' + g.id)) fila.push('#' + g.id);
+      });
+      salvar();
+      return responder(res, 200, { ok: true, msg });
+    }
+
+    if (url.pathname === '/api/grupo-historico') {
+      const g = db.groups[String(b.id || '')];
+      if (!g || !g.members.includes(chave)) return responder(res, 404, { erro: 'Grupo não encontrado.' });
+      const msgs = (db.msgs['g:' + g.id] || []).filter(m => m.f === chave || !tem(eu.blocked, m.f)).slice(-100)
+        .map(m => ({ from: nomeDe(m.f), text: m.text, fmt: m.fmt, t: m.t }));
+      return responder(res, 200, { msgs });
     }
 
     if (url.pathname === '/api/status') {

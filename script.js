@@ -9,6 +9,7 @@ let souAdmin = false;
 let amigos = [];           // [{name, online, away, avatar, bio}]
 let pedidos = [];          // pedidos de amizade recebidos
 let bloqueados = [];       // nomes
+let grupos = [];           // [{id, name, dono, members:[{name,avatar,online,admin}]}]
 let selecionado = '';
 let es = null;             // EventSource
 let somAtivo = true;
@@ -17,7 +18,7 @@ let zTopo = 10;
 const chats = {};          // chave -> chat
 const janelas = {};        // id -> elemento (janelas extras)
 const renders = {};        // id -> função que redesenha a janela
-const gruposAbertos = { online: true, offline: true };
+const gruposAbertos = { online: true, offline: true, grupos: true };
 
 const TEMAS = [
   ['azul', '#1b5fd6', 'Azul'], ['rosa', '#ee5fa4', 'Rosa'], ['verde', '#2fa84a', 'Verde'],
@@ -131,7 +132,9 @@ function fecharJanela(id) {
   delete renders[id];
 }
 function atualizarJanelas() {
-  ['pedidos', 'perfil'].forEach(k => { if (janelas[k] && renders[k]) renders[k](); });
+  Object.keys(renders).forEach(k => {
+    if (janelas[k] && (k === 'pedidos' || k === 'perfil' || k.startsWith('grupo-'))) renders[k]();
+  });
 }
 function fecharTodasJanelas() { Object.keys(janelas).forEach(fecharJanela); }
 
@@ -217,7 +220,7 @@ $('btn-principal').addEventListener('click', enviarLogin);
 
 function voltarAoLogin(msg, erro) {
   if (es) { es.close(); es = null; }
-  token = ''; eu = ''; amigos = []; pedidos = []; bloqueados = []; selecionado = ''; souAdmin = false;
+  token = ''; eu = ''; amigos = []; pedidos = []; bloqueados = []; grupos = []; selecionado = ''; souAdmin = false;
   sessionStorage.removeItem('cb_token');
   Object.keys(chats).forEach(k => { chats[k].janela.remove(); delete chats[k]; });
   fecharTodasJanelas();
@@ -239,7 +242,7 @@ function conectar() {
     eu = d.me;
     meu = { bio: d.bio || '', avatar: d.avatar || '', theme: d.theme || 'azul' };
     souAdmin = !!d.admin;
-    amigos = d.buddies; pedidos = d.requests; bloqueados = d.blocked;
+    amigos = d.buddies; pedidos = d.requests; bloqueados = d.blocked; grupos = d.groups || [];
     aplicarTema(meu.theme);
     $('login-win').classList.add('escondido');
     $('lista-win').classList.remove('escondido');
@@ -249,7 +252,10 @@ function conectar() {
     desenharLista();
     atualizarBadgePedidos();
     somPorta();
-    (d.unread || []).forEach(n => { const c = abrirChat(n, true); avisarNova(c); });
+    (d.unread || []).forEach(n => {
+      const c = n[0] === '#' ? abrirGrupo(n.slice(1), true) : abrirChat(n, true);
+      if (c) avisarNova(c);
+    });
     if ((d.unread || []).length) somRecebe();
   });
 
@@ -273,6 +279,8 @@ function conectar() {
   es.addEventListener('lists', e => aplicarListas(JSON.parse(e.data)));
   es.addEventListener('request', () => { somRecebe(); $('btn-pedidos').classList.add('destaque'); });
   es.addEventListener('msg', e => receber(JSON.parse(e.data)));
+  es.addEventListener('gmsg', e => receberGrupo(JSON.parse(e.data)));
+  es.addEventListener('groups', e => aplicarGrupos(JSON.parse(e.data)));
 
   es.addEventListener('renamed', e => {
     const d = JSON.parse(e.data);
@@ -314,6 +322,18 @@ function aplicarListas(l) {
   Object.values(chats).forEach(atualizarContato);
 }
 
+function aplicarGrupos(l) {
+  grupos = l || [];
+  desenharLista();
+  atualizarJanelas();
+  Object.keys(chats).forEach(k => {
+    const c = chats[k];
+    if (!c.grupo) return;
+    if (!grupos.some(g => g.id === c.id)) { c.janela.remove(); delete chats[k]; }
+    else atualizarContato(c);
+  });
+}
+
 function atualizarPerfilMini() {
   $('meu-nome').textContent = eu;
   $('lista-titulo').textContent = 'Lista de Amigos de ' + eu;
@@ -347,10 +367,27 @@ function desenharLista() {
 
   if (!amigos.length) {
     box.innerHTML = '<div class="vazio">Sua lista está vazia. Clique em "Adicionar" e digite o nome de uma pessoa para enviar um pedido de amizade.</div>';
-    return;
+  } else {
+    grupo(box, 'online', 'Amigos Online (' + on.length + '/' + amigos.length + ')', on);
+    grupo(box, 'offline', 'Offline (' + off.length + '/' + amigos.length + ')', off);
   }
-  grupo(box, 'online', 'Amigos Online (' + on.length + '/' + amigos.length + ')', on);
-  grupo(box, 'offline', 'Offline (' + off.length + '/' + amigos.length + ')', off);
+  secaoGrupos(box);
+}
+function secaoGrupos(box) {
+  if (!grupos.length) return;
+  const t = document.createElement('div');
+  t.className = 'grupo-titulo';
+  t.textContent = (gruposAbertos.grupos ? '▼ ' : '▶ ') + 'Grupos (' + grupos.length + ')';
+  t.addEventListener('click', () => { gruposAbertos.grupos = !gruposAbertos.grupos; desenharLista(); });
+  box.appendChild(t);
+  if (!gruposAbertos.grupos) return;
+  grupos.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).forEach(g => {
+    const l = document.createElement('div');
+    l.className = 'amigo';
+    l.innerHTML = '<span><span class="mini-av">👥</span>' + esc(g.name) + ' (' + g.members.length + ')</span>';
+    l.addEventListener('click', () => abrirGrupo(g.id));
+    box.appendChild(l);
+  });
 }
 function grupo(box, id, titulo, lista) {
   const t = document.createElement('div');
@@ -390,12 +427,12 @@ async function bloquear(nome, semConfirmar) {
     desenharLista();
   } catch (e) { alert(e.message); }
 }
-async function denunciar(nome) {
+async function denunciar(nome, grupoId) {
   const motivo = prompt('Por que você está denunciando ' + nome + '?\n(A conversa de vocês será enviada para a administradora avaliar.)');
   if (motivo === null) return;
   if (!motivo.trim()) return alert('Escreva o motivo da denúncia.');
   try {
-    await api('report', { name: nome, motivo: motivo.trim() });
+    await api('report', { name: nome, motivo: motivo.trim(), grupo: grupoId });
     alert('Denúncia enviada. Obrigada por avisar!');
     if (amigos.some(a => a.name.toLowerCase() === nome.toLowerCase()) &&
         confirm('Quer bloquear ' + nome + ' também?')) bloquear(nome, true);
@@ -420,6 +457,7 @@ $('btn-bloq').addEventListener('click', () => { if (exigirSelecionado()) bloquea
 $('btn-denun').addEventListener('click', () => { if (exigirSelecionado()) denunciar(selecionado); });
 $('btn-ver').addEventListener('click', () => { if (exigirSelecionado()) verPerfil(selecionado); });
 $('btn-pedidos').addEventListener('click', abrirPedidos);
+$('btn-grupo').addEventListener('click', abrirNovoGrupo);
 $('btn-perfil').addEventListener('click', abrirMeuPerfil);
 $('btn-denuncias').addEventListener('click', abrirDenuncias);
 
@@ -605,7 +643,7 @@ function abrirDenuncias() {
       d.reports.forEach(r => {
         const it = document.createElement('div');
         it.className = 'denuncia' + (r.status !== 'aberta' ? ' fechada' : '');
-        it.innerHTML = '<div><b>#' + r.id + '</b> ' + esc(r.de) + ' denunciou <b>' + esc(r.alvo) + '</b></div>' +
+        it.innerHTML = '<div><b>#' + r.id + '</b> ' + esc(r.de) + ' denunciou <b>' + esc(r.alvo) + '</b>' + (r.grupo ? ' (no grupo ' + esc(r.grupo) + ')' : '') + '</div>' +
           '<small>' + new Date(r.t).toLocaleString('pt-BR') + ' · ' + esc(r.status) + (r.banido ? ' · conta suspensa' : '') + '</small>' +
           '<div>Motivo: ' + esc(r.motivo) + '</div>';
         const conv = document.createElement('div');
@@ -704,6 +742,15 @@ function mostrar(c, m) {
   c.hist.scrollTop = c.hist.scrollHeight;
 }
 function atualizarContato(c) {
+  if (c.grupo) {
+    const g = grupos.find(x => x.id === c.id);
+    if (g) {
+      c.nome = g.name;
+      c.janela.querySelector('.titulo-txt').textContent = g.name + ' - Grupo';
+    }
+    c.contato.innerHTML = '<span class="mini-av">👥</span><b>' + esc(c.nome) + '</b>' + (g ? ' <small>' + g.members.length + ' membros</small>' : '');
+    return;
+  }
   const a = amigos.find(x => x.name.toLowerCase() === c.chave);
   c.contato.innerHTML = miniAv(a && a.avatar) + '<b>' + esc(c.nome) + '</b>' + (a && a.bio ? ' <small>' + esc(a.bio) + '</small>' : '');
 }
@@ -712,13 +759,7 @@ function fecharPops() {
 }
 document.addEventListener('click', fecharPops);
 
-function abrirChat(nome, semFoco) {
-  const chave = nome.toLowerCase();
-  if (chats[chave]) {
-    chats[chave].janela.style.zIndex = ++zTopo;
-    if (!semFoco) chats[chave].input.focus();
-    return chats[chave];
-  }
+function montarJanela(rotuloMenu) {
   const n = Object.keys(chats).length;
   const j = document.createElement('div');
   j.className = 'janela chat';
@@ -729,7 +770,7 @@ function abrirChat(nome, semFoco) {
     '<div class="titulo"><span class="titulo-txt"></span>' +
     '<button class="btn-titulo" title="Fechar">X</button></div>' +
     '<div class="corpo">' +
-      '<div class="menubar-chat"><span>Arquivo</span><span>Editar</span><span class="menu-pessoas">Pessoas ▾</span>' +
+      '<div class="menubar-chat"><span>Arquivo</span><span>Editar</span><span class="menu-pessoas">' + rotuloMenu + '</span>' +
         '<div class="menu-pop escondido"></div></div>' +
       '<div class="contato"></div>' +
       '<div class="historico"></div>' +
@@ -744,40 +785,30 @@ function abrirChat(nome, semFoco) {
       '<button class="botao" data-enviar>Enviar</button></div>' +
     '</div>' +
     '<div class="emo-pop escondido"></div>';
-  j.querySelector('.titulo-txt').textContent = nome + ' - Mensagem Instantânea';
   $('janelas-chat').appendChild(j);
   arrastavel(j);
+  return j;
+}
 
-  const c = {
-    janela: j, nome, chave,
-    hist: j.querySelector('.historico'),
-    input: j.querySelector('textarea'),
-    contato: j.querySelector('.contato'),
-    fmt: { b: false, i: false, u: false },
-    vistos: new Set(), fila: [], pronto: false
-  };
-  chats[chave] = c;
-  atualizarContato(c);
-
-  // Menu "Pessoas"
+function ligarMenu(j, itens) {
   const menu = j.querySelector('.menu-pop');
-  [['👁 Ver perfil', () => verPerfil(c.nome)], ['🚩 Denunciar', () => denunciar(c.nome)], ['🚫 Bloquear', () => bloquear(c.nome)]]
-    .forEach(([t, fn]) => {
-      const b = document.createElement('button');
-      b.type = 'button'; b.textContent = t;
-      b.addEventListener('click', fn);
-      menu.appendChild(b);
-    });
+  itens.forEach(([t, fn]) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = t;
+    b.addEventListener('click', fn);
+    menu.appendChild(b);
+  });
   j.querySelector('.menu-pessoas').addEventListener('click', e => {
     e.stopPropagation();
     const abrir = menu.classList.contains('escondido');
     fecharPops();
     if (abrir) menu.classList.remove('escondido');
   });
+}
 
-  // Emoticons
+function ligarBarra(j, c) {
   const pop = j.querySelector('.emo-pop');
-  EMO_CODIGOS.slice().sort((a, b) => Object.keys(EMO_SVG).indexOf(a) - Object.keys(EMO_SVG).indexOf(b)).forEach(k => {
+  Object.keys(EMO_SVG).forEach(k => {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'emo-btn'; b.title = k;
     b.innerHTML = emoImg(k);
@@ -797,12 +828,244 @@ function abrirChat(nome, semFoco) {
     fecharPops();
     if (abrir) pop.classList.remove('escondido');
   });
-
   j.querySelectorAll('.barra-fmt .botao[data-f]').forEach(b => b.addEventListener('click', () => {
     c.fmt[b.dataset.f] = !c.fmt[b.dataset.f];
     b.classList.toggle('ativo');
     c.input.focus();
   }));
+}
+
+function ligarEnvio(c, enviar) {
+  const j = c.janela;
+  j.querySelector('[data-enviar]').addEventListener('click', enviar);
+  c.input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviar(); }
+  });
+  j.querySelector('.btn-titulo').addEventListener('click', () => { j.remove(); delete chats[c.chave]; });
+  j.addEventListener('mousedown', () => j.querySelector('.titulo').classList.remove('piscando'));
+}
+
+// ---------- Grupos ----------
+function abrirGrupo(id, semFoco) {
+  const chave = 'g:' + id;
+  if (chats[chave]) {
+    chats[chave].janela.style.zIndex = ++zTopo;
+    if (!semFoco) chats[chave].input.focus();
+    return chats[chave];
+  }
+  const g = grupos.find(x => x.id === id);
+  if (!g) return null;
+  const j = montarJanela('Grupo ▾');
+  const c = {
+    janela: j, nome: g.name, chave, grupo: true, id,
+    hist: j.querySelector('.historico'),
+    input: j.querySelector('textarea'),
+    contato: j.querySelector('.contato'),
+    fmt: { b: false, i: false, u: false },
+    vistos: new Set(), fila: [], pronto: false
+  };
+  chats[chave] = c;
+  atualizarContato(c);
+  ligarMenu(j, [['👥 Membros e administração', () => abrirGerenciar(id)], ['🚪 Sair do grupo', () => sairGrupo(id)]]);
+  ligarBarra(j, c);
+
+  api('grupo-historico', { id }).then(r => {
+    if (r.msgs.length) sistema(c, '— Mensagens anteriores —');
+    r.msgs.forEach(m => mostrar(c, m));
+    if (r.msgs.length) sistema(c, '— Agora —');
+  }).catch(e => {
+    sistema(c, 'Não consegui carregar o histórico: ' + e.message);
+  }).then(() => {
+    c.pronto = true;
+    c.fila.forEach(m => mostrar(c, m));
+    c.fila = [];
+    c.input.disabled = false;
+    if (!semFoco) c.input.focus();
+  });
+
+  async function enviar() {
+    const texto = c.input.value.trim();
+    if (!texto || !c.pronto) return;
+    c.input.value = '';
+    try {
+      const r = await api('grupo-enviar', { id, text: texto, fmt: c.fmt });
+      mostrar(c, r.msg);
+      somEnvia();
+    } catch (e) {
+      sistema(c, 'Não enviada: ' + e.message);
+    }
+  }
+  ligarEnvio(c, enviar);
+  return c;
+}
+
+function receberGrupo(m) {
+  const c = abrirGrupo(m.gid, true);
+  if (!c) return;
+  if (c.pronto) mostrar(c, m); else c.fila.push(m);
+  somRecebe();
+  avisarNova(c);
+  piscarAba(m.from);
+}
+
+async function grupoAcao(id, acao, extra) {
+  const r = await api('grupo-acao', Object.assign({ id, acao }, extra || {}));
+  aplicarGrupos(r.grupos);
+  return r;
+}
+async function sairGrupo(id) {
+  const g = grupos.find(x => x.id === id);
+  if (!g || !confirm('Sair do grupo ' + g.name + '?')) return;
+  try { await grupoAcao(id, 'leave'); } catch (e) { alert(e.message); }
+}
+
+function abrirNovoGrupo() {
+  const w = janela('novo-grupo', 'Novo grupo', 300);
+  if (!w.nova) return;
+  w.corpo.innerHTML =
+    '<label>Nome do grupo</label><input class="entrada" id="ng-nome" maxlength="24">' +
+    '<label>Quem entra (seus amigos)</label><div class="entrada-inset bloq-lista" id="ng-lista" style="max-height:160px"></div>' +
+    '<small>Você será a administradora do grupo.</small>' +
+    '<div class="botoes-login"><button class="botao" id="ng-criar">Criar grupo</button></div>' +
+    '<div class="status-login" id="ng-status"></div>';
+  const q = id => w.corpo.querySelector('#' + id);
+  const lista = q('ng-lista');
+  if (!amigos.length) lista.innerHTML = '<div class="vazio">Você ainda não tem amigos. Dá para criar o grupo vazio e adicionar depois.</div>';
+  amigos.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).forEach(a => {
+    const l = document.createElement('label');
+    l.className = 'item-linha';
+    l.style.fontWeight = 'normal';
+    l.innerHTML = '<span>' + miniAv(a.avatar) + esc(a.name) + '</span><input type="checkbox">';
+    l.querySelector('input').value = a.name;
+    lista.appendChild(l);
+  });
+  q('ng-criar').addEventListener('click', async () => {
+    const membros = [...lista.querySelectorAll('input:checked')].map(i => i.value);
+    q('ng-status').textContent = 'Criando...';
+    q('ng-status').className = 'status-login';
+    try {
+      const r = await api('grupo-criar', { name: q('ng-nome').value, members: membros });
+      aplicarGrupos(r.grupos);
+      fecharJanela('novo-grupo');
+      abrirGrupo(r.id);
+    } catch (e) {
+      q('ng-status').textContent = e.message;
+      q('ng-status').className = 'status-login erro';
+    }
+  });
+}
+
+function abrirGerenciar(id) {
+  const key = 'grupo-' + id;
+  const w = janela(key, 'Grupo', 320);
+  if (!w.nova) return;
+  renders[key] = () => {
+    const g = grupos.find(x => x.id === id);
+    if (!g) { fecharJanela(key); return; }
+    w.j.querySelector('.titulo span').textContent = 'Grupo: ' + g.name;
+    const meuNome = eu.toLowerCase();
+    const souAdm = g.members.some(m => m.name.toLowerCase() === meuNome && m.admin);
+    const souDono = g.dono.toLowerCase() === meuNome;
+    const tentar = fn => async () => { try { await fn(); } catch (e) { alert(e.message); } };
+    w.corpo.innerHTML = '';
+
+    if (souAdm) {
+      const linha = document.createElement('div');
+      linha.className = 'pedido-btns';
+      const inp = document.createElement('input');
+      inp.className = 'entrada'; inp.maxLength = 24; inp.value = g.name; inp.style.flex = '1';
+      linha.appendChild(inp);
+      linha.appendChild(botao('Renomear', tentar(() => grupoAcao(id, 'rename', { novoNome: inp.value }))));
+      w.corpo.appendChild(linha);
+    }
+
+    const tit = document.createElement('label');
+    tit.textContent = 'Membros (' + g.members.length + ')';
+    w.corpo.appendChild(tit);
+    const box = document.createElement('div');
+    box.className = 'entrada-inset bloq-lista';
+    box.style.maxHeight = '230px';
+    g.members.forEach(m => {
+      const ehDono = m.name.toLowerCase() === g.dono.toLowerCase();
+      const ehEu = m.name.toLowerCase() === meuNome;
+      const l = document.createElement('div');
+      l.className = 'item-linha';
+      l.style.flexWrap = 'wrap';
+      l.innerHTML = '<span>' + miniAv(m.avatar) + esc(m.name) + (ehDono ? ' 👑' : m.admin ? ' ⭐' : '') + '</span>';
+      const bt = document.createElement('span');
+      bt.className = 'pedido-btns';
+      if (souAdm && !ehEu && !m.admin) bt.appendChild(botao('⭐ Promover', tentar(() => grupoAcao(id, 'promote', { name: m.name }))));
+      if (souDono && !ehEu && m.admin && !ehDono) bt.appendChild(botao('Rebaixar', tentar(() => grupoAcao(id, 'demote', { name: m.name }))));
+      if (souAdm && !ehEu && !ehDono && (!m.admin || souDono)) {
+        bt.appendChild(botao('Remover', tentar(async () => {
+          if (confirm('Remover ' + m.name + ' do grupo?')) await grupoAcao(id, 'remove', { name: m.name });
+        })));
+      }
+      if (!ehEu) bt.appendChild(botao('🚩', () => denunciar(m.name, id)));
+      l.appendChild(bt);
+      box.appendChild(l);
+    });
+    w.corpo.appendChild(box);
+    const legenda = document.createElement('small');
+    legenda.textContent = '👑 dona do grupo · ⭐ administrador';
+    w.corpo.appendChild(legenda);
+
+    if (souAdm) {
+      const disponiveis = amigos.filter(a => !g.members.some(m => m.name.toLowerCase() === a.name.toLowerCase()));
+      const lab = document.createElement('label');
+      lab.textContent = 'Adicionar amigo';
+      w.corpo.appendChild(lab);
+      const linha = document.createElement('div');
+      linha.className = 'pedido-btns';
+      if (!disponiveis.length) {
+        linha.innerHTML = '<span class="vazio">Todos os seus amigos já estão aqui.</span>';
+      } else {
+        const sel = document.createElement('select');
+        sel.className = 'entrada'; sel.style.flex = '1';
+        disponiveis.forEach(a => { const o = document.createElement('option'); o.value = a.name; o.textContent = a.name; sel.appendChild(o); });
+        linha.appendChild(sel);
+        linha.appendChild(botao('Adicionar', tentar(() => grupoAcao(id, 'add', { name: sel.value }))));
+      }
+      w.corpo.appendChild(linha);
+    }
+
+    const fim = document.createElement('div');
+    fim.className = 'pedido-btns';
+    fim.style.marginTop = '8px';
+    fim.appendChild(botao('🚪 Sair do grupo', () => sairGrupo(id)));
+    if (souDono) {
+      fim.appendChild(botao('🗑 Excluir grupo', tentar(async () => {
+        if (confirm('Excluir o grupo ' + g.name + ' para todos? As mensagens serão apagadas.')) await grupoAcao(id, 'delete');
+      })));
+    }
+    w.corpo.appendChild(fim);
+  };
+  renders[key]();
+}
+
+function abrirChat(nome, semFoco) {
+  const chave = nome.toLowerCase();
+  if (chats[chave]) {
+    chats[chave].janela.style.zIndex = ++zTopo;
+    if (!semFoco) chats[chave].input.focus();
+    return chats[chave];
+  }
+  const j = montarJanela('Pessoas ▾');
+  j.querySelector('.titulo-txt').textContent = nome + ' - Mensagem Instantânea';
+
+  const c = {
+    janela: j, nome, chave,
+    hist: j.querySelector('.historico'),
+    input: j.querySelector('textarea'),
+    contato: j.querySelector('.contato'),
+    fmt: { b: false, i: false, u: false },
+    vistos: new Set(), fila: [], pronto: false
+  };
+  chats[chave] = c;
+  atualizarContato(c);
+
+  ligarMenu(j, [['👁 Ver perfil', () => verPerfil(c.nome)], ['🚩 Denunciar', () => denunciar(c.nome)], ['🚫 Bloquear', () => bloquear(c.nome)]]);
+  ligarBarra(j, c);
 
   // Histórico salvo no servidor
   api('history', { with: nome }).then(r => {
@@ -842,12 +1105,7 @@ function abrirChat(nome, semFoco) {
       sistema(c, 'Não enviada: ' + e.message);
     }
   }
-  j.querySelector('[data-enviar]').addEventListener('click', enviar);
-  c.input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviar(); }
-  });
-  j.querySelector('.btn-titulo').addEventListener('click', () => { j.remove(); delete chats[c.chave]; });
-  j.addEventListener('mousedown', () => j.querySelector('.titulo').classList.remove('piscando'));
+  ligarEnvio(c, enviar);
 
   return c;
 }
@@ -862,10 +1120,13 @@ function receber(m) {
   if (c.pronto) mostrar(c, m); else c.fila.push(m);
   somRecebe();
   avisarNova(c);
+  piscarAba(m.from);
+}
+function piscarAba(quem) {
   if (document.hidden && !piscaTimer) {
     let alt = false;
     piscaTimer = setInterval(() => {
-      document.title = (alt = !alt) ? '💬 ' + m.from + ' diz...' : 'BIM';
+      document.title = (alt = !alt) ? '💬 ' + quem + ' diz...' : 'BIM';
       if (!document.hidden) { clearInterval(piscaTimer); piscaTimer = null; document.title = 'BIM'; }
     }, 900);
   }
