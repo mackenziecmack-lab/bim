@@ -244,3 +244,14 @@ body.tema-preto {
   #lista-win { width: calc(100vw - 12px) !important; left: 4px !important; height: 92vh !important; top: 4px !important; }
   .janela-extra { left: 4px !important; width: calc(100vw - 12px) !important; }
 }
+
+/* Responder / editar / apagar mensagens */
+.msg .acoes { margin-left: 6px; opacity: .45; white-space: nowrap; }
+.msg:hover .acoes { opacity: 1; }
+.acoes button { border: 0; background: none; cursor: pointer; font-size: 14px; padding: 0 3px; }
+.resp-prev { border-left: 3px solid #808080; background: #f0f0f0; color: #404040; padding: 1px 5px; margin: 0 0 2px 2px; font-size: 12px; word-break: break-word; }
+.editada { color: #808080; font-style: italic; }
+.resp-barra { display: flex; align-items: center; justify-content: space-between; gap: 6px; background: #f0f0f0; border-left: 3px solid #808080; padding: 2px 6px; font-family: var(--fonte-msg); font-size: 12px; overflow: hidden; }
+.resp-barra span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resp-barra button { border: 0; background: none; cursor: pointer; font-size: 14px; }
+.msg textarea.editando { width: 100%; box-sizing: border-box; min-height: 42px; font-family: var(--fonte-msg); font-size: 13px; margin: 2px 0; }

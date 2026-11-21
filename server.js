@@ -38,11 +38,28 @@ let db = { users: {}, offline: {}, msgs: {}, reports: [], nextReport: 1, groups:
 const sessions = new Map();     // token -> { k: chave, t: último uso }
 const ultimoSalvo = new Map();  // chave do Redis -> texto já salvo
 
-function guardarMsg(deChave, paraChave, text, fmt, t) {
+const novoId = () => crypto.randomBytes(6).toString('hex');
+
+// Guarda uma mensagem. Cada mensagem tem um id (para editar/apagar) e, se for resposta, r = id da original.
+function guardarMsg(deChave, paraChave, text, fmt, t, r) {
   const k = chaveConversa(deChave, paraChave);
   const l = db.msgs[k] = db.msgs[k] || [];
-  l.push({ f: deChave, text, fmt, t });
+  const m = { id: novoId(), f: deChave, text, fmt, t };
+  if (r) m.r = r;
+  l.push(m);
   if (l.length > 300) l.splice(0, l.length - 300);
+  return m;
+}
+
+// Formato que vai para o navegador (resolve a prévia da mensagem respondida)
+function publica(lista, m) {
+  const o = { id: m.id, from: nomeDe(m.f), text: m.text, fmt: m.fmt, t: m.t };
+  if (m.edited) o.edited = true;
+  if (m.r) {
+    const x = lista.find(y => y.id === m.r);
+    o.reply = x ? { id: x.id, from: nomeDe(x.f), text: x.text } : { id: m.r, gone: true };
+  }
+  return o;
 }
 
 function carregarArquivo() {
@@ -85,6 +102,8 @@ function normalizarDb() {
     });
     db.offline[k] = [...nomes];
   }
+  // Mensagens antigas ganham um id (assim também podem ser editadas/apagadas)
+  Object.values(db.msgs).forEach(l => l.forEach(m => { if (!m.id) m.id = novoId(); }));
   // Sessões salvas (assim ninguém é deslogado quando o servidor reinicia)
   const agora = Date.now();
   for (const [token, s] of Object.entries(db.sessions)) {
@@ -536,8 +555,10 @@ const servidor = http.createServer(async (req, res) => {
       if (!tem(eu.buddies, paraChave) || !tem(dest.buddies, chave)) return responder(res, 403, { erro: 'Vocês ainda não são amigos.' });
       if (tem(dest.blocked, chave) || tem(eu.blocked, paraChave)) return responder(res, 403, { erro: 'Não foi possível entregar a mensagem.' });
       const f = b.fmt || {};
-      const msg = { from: eu.name, text: texto, fmt: { b: !!f.b, i: !!f.i, u: !!f.u }, t: Date.now() };
-      guardarMsg(chave, paraChave, msg.text, msg.fmt, msg.t);
+      const listaConv = db.msgs[chaveConversa(chave, paraChave)] || [];
+      const orig = b.reply ? listaConv.find(y => y.id === String(b.reply)) : null;
+      const salva = guardarMsg(chave, paraChave, texto, { b: !!f.b, i: !!f.i, u: !!f.u }, Date.now(), orig && orig.id);
+      const msg = publica(db.msgs[chaveConversa(chave, paraChave)], salva);
       const o = online.get(paraChave);
       if (o) {
         empurrar(paraChave, 'msg', msg);
@@ -554,8 +575,8 @@ const servidor = http.createServer(async (req, res) => {
     if (url.pathname === '/api/history') {
       const w = minus(b.with || '');
       if (!db.users[w] || !tem(eu.buddies, w)) return responder(res, 403, { erro: 'Vocês não são amigos.' });
-      const msgs = (db.msgs[chaveConversa(chave, w)] || []).slice(-100)
-        .map(m => ({ from: nomeDe(m.f), text: m.text, fmt: m.fmt, t: m.t }));
+      const lista = db.msgs[chaveConversa(chave, w)] || [];
+      const msgs = lista.slice(-100).map(m => publica(lista, m));
       return responder(res, 200, { msgs });
     }
 
@@ -812,11 +833,14 @@ const servidor = http.createServer(async (req, res) => {
       const texto = String(b.text || '').trim().slice(0, 500);
       if (!texto) return responder(res, 400, { erro: 'Mensagem vazia.' });
       const f = b.fmt || {};
-      const msg = { gid: g.id, from: eu.name, text: texto, fmt: { b: !!f.b, i: !!f.i, u: !!f.u }, t: Date.now() };
       const k = 'g:' + g.id;
       const l = db.msgs[k] = db.msgs[k] || [];
-      l.push({ f: chave, text: msg.text, fmt: msg.fmt, t: msg.t });
+      const orig = b.reply ? l.find(y => y.id === String(b.reply)) : null;
+      const salva = { id: novoId(), f: chave, text: texto, fmt: { b: !!f.b, i: !!f.i, u: !!f.u }, t: Date.now() };
+      if (orig) salva.r = orig.id;
+      l.push(salva);
       if (l.length > 300) l.splice(0, l.length - 300);
+      const msg = Object.assign({ gid: g.id }, publica(l, salva));
       g.members.forEach(m => {
         const u = db.users[m];
         if (m === chave || !u || tem(u.blocked, chave)) return;
@@ -831,9 +855,52 @@ const servidor = http.createServer(async (req, res) => {
     if (url.pathname === '/api/grupo-historico') {
       const g = db.groups[String(b.id || '')];
       if (!g || !g.members.includes(chave)) return responder(res, 404, { erro: 'Grupo não encontrado.' });
-      const msgs = (db.msgs['g:' + g.id] || []).filter(m => m.f === chave || !tem(eu.blocked, m.f)).slice(-100)
-        .map(m => ({ from: nomeDe(m.f), text: m.text, fmt: m.fmt, t: m.t }));
+      const lista = db.msgs['g:' + g.id] || [];
+      const msgs = lista.filter(m => m.f === chave || !tem(eu.blocked, m.f)).slice(-100)
+        .map(m => publica(lista, m));
       return responder(res, 200, { msgs });
+    }
+
+    // Editar / apagar mensagem. Editar: só a autora. Apagar: a autora (no grupo, os administradores também).
+    if (url.pathname === '/api/msg-editar' || url.pathname === '/api/msg-apagar') {
+      const editar = url.pathname === '/api/msg-editar';
+      if (limite(envios, chave, 20, 10000)) return responder(res, 429, { erro: 'Calma! Você está fazendo isso rápido demais.' });
+      const id = String(b.id || '');
+      let lista, g = null, w = '';
+      if (b.grupo) {
+        g = db.groups[String(b.grupo)];
+        if (!g || !g.members.includes(chave)) return responder(res, 404, { erro: 'Grupo não encontrado.' });
+        lista = db.msgs['g:' + g.id] || [];
+      } else {
+        w = minus(b.with || '');
+        if (!db.users[w] || w === chave) return responder(res, 404, { erro: 'Usuário não encontrado.' });
+        lista = db.msgs[chaveConversa(chave, w)] || [];
+      }
+      const i = lista.findIndex(m => m.id === id);
+      if (i < 0) return responder(res, 404, { erro: 'Mensagem não encontrada.' });
+      const m = lista[i];
+      const dona = m.f === chave;
+      if (editar) {
+        if (!dona) return responder(res, 403, { erro: 'Você só pode editar suas próprias mensagens.' });
+        const texto = String(b.text || '').trim().slice(0, 500);
+        if (!texto) return responder(res, 400, { erro: 'Mensagem vazia.' });
+        m.text = texto;
+        m.edited = true;
+      } else {
+        if (!dona && !(g && g.admins.includes(chave))) return responder(res, 403, { erro: 'Você só pode apagar suas próprias mensagens.' });
+        lista.splice(i, 1);
+      }
+      salvar();
+      const aviso = editar ? 'msgedit' : 'msgdel';
+      const dados = editar ? publica(lista, m) : { id };
+      if (g) {
+        g.members.forEach(k => empurrar(k, aviso, Object.assign({ gid: g.id }, dados)));
+      } else {
+        empurrar(chave, aviso, Object.assign({ with: nomeDe(w) }, dados));
+        const dest = db.users[w];
+        if (!tem(dest.blocked, chave) && !tem(eu.blocked, w)) empurrar(w, aviso, Object.assign({ with: eu.name }, dados));
+      }
+      return responder(res, 200, { ok: true, msg: editar ? publica(lista, m) : undefined });
     }
 
     if (url.pathname === '/api/status') {
@@ -875,7 +942,7 @@ async function iniciar() {
     console.log('Aviso: guardando dados só em arquivo. No Render grátis eles somem quando o servidor reinicia (veja o LEIA-ME).');
   }
   normalizarDb();
-  if (USA_REDIS) salvar();
+  salvar();
   servidor.listen(PORT, () => {
     console.log('BIM rodando em http://localhost:' + PORT);
     if (!CODIGO_ADMIN) console.log('Aviso: defina CODIGO_ADMIN para poder criar a conta ' + ADMIN_NOME + '.');

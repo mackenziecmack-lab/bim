@@ -66,6 +66,23 @@ $('btn-musica').addEventListener('click', () => {
   if (musicaLigada) tocarMusica(); else musica.pause();
   atualizarBtnMusica();
 });
+// Lembra onde a música parou: ao voltar no site ela continua dali (começa no primeiro toque)
+function salvarPosicaoMusica() {
+  if (!musica.currentTime) return;
+  try { localStorage.setItem('bim_musica_pos', JSON.stringify({ src: musica.currentSrc.split('/').pop(), t: musica.currentTime })); } catch (e) {}
+}
+function restaurarPosicaoMusica() {
+  try {
+    const p = JSON.parse(localStorage.getItem('bim_musica_pos') || 'null');
+    if (p && p.src === musica.currentSrc.split('/').pop() && p.t > 0 && p.t < (musica.duration || Infinity) - 1) musica.currentTime = p.t;
+  } catch (e) {}
+}
+if (musica.readyState >= 1) restaurarPosicaoMusica();
+else musica.addEventListener('loadedmetadata', restaurarPosicaoMusica, { once: true });
+setInterval(() => { if (!musica.paused) salvarPosicaoMusica(); }, 2000);
+musica.addEventListener('pause', salvarPosicaoMusica);
+window.addEventListener('pagehide', salvarPosicaoMusica);
+document.addEventListener('visibilitychange', () => { if (document.hidden) salvarPosicaoMusica(); });
 musica.addEventListener('error', () => $('btn-musica').classList.add('escondido'));
 musica.addEventListener('play', atualizarBtnMusica);
 musica.addEventListener('pause', atualizarBtnMusica);
@@ -338,6 +355,8 @@ function conectar() {
   es.addEventListener('request', () => { somRecebe(); $('btn-pedidos').classList.add('destaque'); });
   es.addEventListener('msg', e => receber(JSON.parse(e.data)));
   es.addEventListener('gmsg', e => receberGrupo(JSON.parse(e.data)));
+  es.addEventListener('msgdel', e => { const d = JSON.parse(e.data); const ch = chatDe(d); if (ch && ch.pronto) removerMsg(ch, d.id); });
+  es.addEventListener('msgedit', e => { const d = JSON.parse(e.data); const ch = chatDe(d); if (ch && ch.pronto) aplicarEdicao(ch, d); });
   es.addEventListener('groups', e => aplicarGrupos(JSON.parse(e.data)));
 
   es.addEventListener('renamed', e => {
@@ -950,16 +969,119 @@ function sistema(c, texto) {
   c.hist.appendChild(d);
   c.hist.scrollTop = c.hist.scrollHeight;
 }
-function mostrar(c, m) {
-  const chave = m.t + '|' + m.from.toLowerCase() + '|' + m.text;
-  if (c.vistos.has(chave)) return;
-  c.vistos.add(chave);
+function corta(t) { t = String(t); return t.length > 60 ? t.slice(0, 60) + '…' : t; }
+function previaHtml(de, texto) { return '<b>' + esc(de) + '</b>: ' + formatar(corta(texto), null); }
+function souAdmDoGrupo(c) {
+  const g = grupos.find(x => x.id === c.id);
+  const mb = g && g.members.find(x => x.name.toLowerCase() === eu.toLowerCase());
+  return !!(mb && mb.admin);
+}
+function acaoBtn(txt, titulo, fn) {
+  const b = document.createElement('button');
+  b.type = 'button'; b.textContent = txt; b.title = titulo;
+  b.addEventListener('click', e => { e.stopPropagation(); fn(); });
+  return b;
+}
+function desenharMsg(c, d, m) {
   const meuNome = m.from.toLowerCase() === eu.toLowerCase();
+  let h = '';
+  if (m.reply) {
+    h += '<div class="resp-prev" data-rid="' + esc(m.reply.id) + '">' +
+      (m.reply.gone ? '<i>mensagem apagada</i>' : previaHtml(m.reply.from, m.reply.text)) + '</div>';
+  }
+  h += '<span class="' + (meuNome ? 'eu' : 'ele') + '">' + esc(m.from) + '</span> (' + hora(m.t) + '): ' + formatar(m.text, m.fmt);
+  if (m.edited) h += ' <small class="editada">(editada)</small>';
+  d.innerHTML = h;
+  const ac = document.createElement('span');
+  ac.className = 'acoes';
+  ac.appendChild(acaoBtn('↩', 'Responder', () => responderMsg(c, m)));
+  if (meuNome) ac.appendChild(acaoBtn('✏', 'Editar', () => editarMsg(c, d, m)));
+  if (meuNome || (c.grupo && souAdmDoGrupo(c))) ac.appendChild(acaoBtn('🗑', 'Apagar', () => apagarMsg(c, m)));
+  d.appendChild(ac);
+}
+function mostrar(c, m) {
+  if (c.vistos.has(m.id)) return;
+  c.vistos.add(m.id);
+  c.msgs = c.msgs || new Map();
+  c.msgs.set(m.id, m);
   const d = document.createElement('div');
   d.className = 'msg';
-  d.innerHTML = '<span class="' + (meuNome ? 'eu' : 'ele') + '">' + esc(m.from) + '</span> (' + hora(m.t) + '): ' + formatar(m.text, m.fmt);
+  d.dataset.id = m.id;
+  desenharMsg(c, d, m);
   c.hist.appendChild(d);
   c.hist.scrollTop = c.hist.scrollHeight;
+}
+function elMsg(c, id) { return c.hist.querySelector('.msg[data-id="' + id + '"]'); }
+function atualizarPrevias(c, m) {
+  c.hist.querySelectorAll('.resp-prev').forEach(p => {
+    if (p.dataset.rid === m.id) p.innerHTML = previaHtml(m.from, m.text);
+  });
+}
+function removerMsg(c, id) {
+  const el = elMsg(c, id);
+  if (el) el.remove();
+  if (c.msgs) c.msgs.delete(id);
+  c.hist.querySelectorAll('.resp-prev').forEach(p => {
+    if (p.dataset.rid === id) p.innerHTML = '<i>mensagem apagada</i>';
+  });
+  if (c.respondendo && c.respondendo.id === id) limparResposta(c);
+}
+function aplicarEdicao(c, d) {
+  const m = c.msgs && c.msgs.get(d.id);
+  if (!m) return;
+  m.text = d.text; m.edited = true;
+  const el = elMsg(c, d.id);
+  if (el) desenharMsg(c, el, m);
+  atualizarPrevias(c, m);
+}
+function chatDe(d) { return d.gid ? chats['g:' + d.gid] : chats[String(d.with).toLowerCase()]; }
+
+function responderMsg(c, m) {
+  c.respondendo = { id: m.id };
+  const b = c.janela.querySelector('.resp-barra');
+  b.innerHTML = '';
+  const t = document.createElement('span');
+  t.innerHTML = '↩ Respondendo a ' + previaHtml(m.from, m.text);
+  const x = acaoBtn('✕', 'Cancelar resposta', () => limparResposta(c));
+  b.appendChild(t); b.appendChild(x);
+  b.classList.remove('escondido');
+  c.input.focus();
+}
+function limparResposta(c) {
+  c.respondendo = null;
+  const b = c.janela.querySelector('.resp-barra');
+  b.classList.add('escondido');
+  b.innerHTML = '';
+}
+async function apagarMsg(c, m) {
+  if (!confirm('Apagar esta mensagem para todos?')) return;
+  try {
+    await api('msg-apagar', c.grupo ? { grupo: c.id, id: m.id } : { with: c.nome, id: m.id });
+    removerMsg(c, m.id);
+  } catch (e) { sistema(c, 'Não apagada: ' + e.message); }
+}
+function editarMsg(c, d, m) {
+  d.innerHTML = '';
+  const ta = document.createElement('textarea');
+  ta.className = 'editando'; ta.maxLength = 500; ta.value = m.text;
+  const bs = botao('Salvar', async () => {
+    const texto = ta.value.trim();
+    if (!texto) return;
+    if (texto === m.text) return desenharMsg(c, d, m);
+    try {
+      const r = await api('msg-editar', Object.assign({ id: m.id, text: texto }, c.grupo ? { grupo: c.id } : { with: c.nome }));
+      m.text = r.msg.text; m.edited = true;
+      desenharMsg(c, d, m);
+      atualizarPrevias(c, m);
+    } catch (e) { sistema(c, 'Não editada: ' + e.message); desenharMsg(c, d, m); }
+  });
+  const bc = botao('Cancelar', () => desenharMsg(c, d, m));
+  ta.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); bs.click(); }
+    if (e.key === 'Escape') bc.click();
+  });
+  d.appendChild(ta); d.appendChild(bs); d.appendChild(bc);
+  ta.focus();
 }
 function atualizarContato(c) {
   if (c.grupo) {
@@ -1000,6 +1122,7 @@ function montarJanela(rotuloMenu) {
         '<button class="botao" data-f="u"><u>U</u></button>' +
         '<button class="botao" data-emo title="Emoticons">' + emoImg(':)') + '</button>' +
       '</div>' +
+      '<div class="resp-barra escondido"></div>' +
       '<textarea maxlength="500" placeholder="Digite sua mensagem..." disabled></textarea>' +
       '<div class="chat-rodape"><small>Enter envia · Shift+Enter quebra linha</small>' +
       '<button class="botao" data-enviar>Enviar</button></div>' +
@@ -1109,8 +1232,10 @@ function abrirGrupo(id, semFoco) {
     const texto = c.input.value.trim();
     if (!texto || !c.pronto) return;
     c.input.value = '';
+    const rid = c.respondendo ? c.respondendo.id : undefined;
+    limparResposta(c);
     try {
-      const r = await api('grupo-enviar', { id, text: texto, fmt: c.fmt });
+      const r = await api('grupo-enviar', { id, text: texto, fmt: c.fmt, reply: rid });
       mostrar(c, r.msg);
       somEnvia();
     } catch (e) {
@@ -1318,8 +1443,10 @@ function abrirChat(nome, semFoco) {
     const texto = c.input.value.trim();
     if (!texto || !c.pronto) return;
     c.input.value = '';
+    const rid = c.respondendo ? c.respondendo.id : undefined;
+    limparResposta(c);
     try {
-      const r = await api('send', { to: c.nome, text: texto, fmt: c.fmt });
+      const r = await api('send', { to: c.nome, text: texto, fmt: c.fmt, reply: rid });
       mostrar(c, r.msg);
       somEnvia();
       if (r.offline) sistema(c, c.nome + ' está offline. A mensagem será entregue quando ele(a) entrar.');
@@ -1428,7 +1555,16 @@ function notificacaoSistema(titulo, corpo) {
 function recarregarHistorico(c) {
   if (!c.pronto) return;
   const p = c.grupo ? api('grupo-historico', { id: c.id }) : api('history', { with: c.nome });
-  p.then(r => r.msgs.forEach(m => mostrar(c, m))).catch(() => {});
+  p.then(r => {
+    r.msgs.forEach(m => {
+      const velho = c.msgs && c.msgs.get(m.id);
+      if (velho && velho.text !== m.text) aplicarEdicao(c, m); else mostrar(c, m);
+    });
+    if (c.msgs && r.msgs.length) {            // apagadas enquanto estava desconectado
+      const ini = r.msgs[0].t, ids = new Set(r.msgs.map(m => m.id));
+      [...c.msgs.values()].forEach(m => { if (m.t >= ini && !ids.has(m.id)) removerMsg(c, m.id); });
+    }
+  }).catch(() => {});
 }
 function piscarAba(quem) {
   if (document.hidden && !piscaTimer) {
