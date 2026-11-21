@@ -132,6 +132,8 @@ body.tema-preto {
 
 /* ---------- Música ---------- */
 #btn-musica { position: fixed; right: 8px; bottom: 8px; z-index: 99999; padding: 3px 8px; font-size: 16px; }
+#btn-proxima { position: fixed; right: 54px; bottom: 8px; z-index: 99999; padding: 3px 8px; font-size: 16px; }
+#yt-wrap { position: fixed; left: -9999px; top: 0; width: 200px; height: 200px; overflow: hidden; }
 
 /* ---------- Login ---------- */
 .login-corpo label { font-weight: bold; margin-top: 4px; }

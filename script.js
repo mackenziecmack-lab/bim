@@ -44,48 +44,98 @@ function aplicarTema(t) {
 }
 try { aplicarTema(localStorage.getItem('bim_tema') || 'azul'); } catch (e) {}
 
-// ---------- Música de fundo ----------
-const musica = $('musica');
-musica.volume = 0.12; // bem baixinho
-let musicaLigada = true;
+// ---------- Música de fundo (playlist do YouTube) ----------
+const PLAYLIST_ID = 'PLNoJ-jBBofgR_EJkFMaXmKCLm9TtdAYTw';
+const VOLUME_MUSICA = 15;          // 0 a 100 (bem baixinho)
+let ytPlayer = null, ytPronto = false, musicaLigada = true, primeiroToque = false, errosSeguidos = 0;
 try { musicaLigada = localStorage.getItem('bim_musica') !== 'off'; } catch (e) {}
+
+function tocando() { return !!(ytPronto && ytPlayer.getPlayerState && ytPlayer.getPlayerState() === 1); }
 function atualizarBtnMusica() {
-  $('btn-musica').textContent = (musicaLigada && !musica.paused) ? '🎵' : '🔇';
+  $('btn-musica').textContent = (musicaLigada && tocando()) ? '🎵' : '🔇';
 }
 function tocarMusica() {
-  if (!musicaLigada) return;
-  const p = musica.play();
-  if (p && p.then) p.then(atualizarBtnMusica).catch(() => {});
+  if (!ytPronto || !musicaLigada || !primeiroToque) return;
+  try { ytPlayer.playVideo(); } catch (e) {}
 }
+// Lembra a faixa e o ponto em que parou (continua dali quando você volta)
+function salvarPosicaoMusica() {
+  if (!ytPronto) return;
+  try {
+    const t = ytPlayer.getCurrentTime();
+    if (t > 0) localStorage.setItem('bim_musica_pos', JSON.stringify({ i: ytPlayer.getPlaylistIndex(), t }));
+  } catch (e) {}
+}
+function lerPosicaoMusica() {
+  try {
+    const p = JSON.parse(localStorage.getItem('bim_musica_pos') || 'null');
+    if (p && p.i >= 0 && p.t >= 0) return p;
+  } catch (e) {}
+  return { i: 0, t: 0 };
+}
+
 // Navegadores só deixam tocar depois do primeiro toque/tecla
-document.addEventListener('pointerdown', tocarMusica, { once: true });
-document.addEventListener('keydown', tocarMusica, { once: true });
+function primeiroGesto() { primeiroToque = true; tocarMusica(); }
+document.addEventListener('pointerdown', primeiroGesto, { once: true });
+document.addEventListener('keydown', primeiroGesto, { once: true });
+
 $('btn-musica').addEventListener('click', () => {
   musicaLigada = !musicaLigada;
   try { localStorage.setItem('bim_musica', musicaLigada ? 'on' : 'off'); } catch (e) {}
-  if (musicaLigada) tocarMusica(); else musica.pause();
+  primeiroToque = true;
+  if (!ytPronto) return;
+  if (musicaLigada) ytPlayer.playVideo(); else ytPlayer.pauseVideo();
   atualizarBtnMusica();
 });
-// Lembra onde a música parou: ao voltar no site ela continua dali (começa no primeiro toque)
-function salvarPosicaoMusica() {
-  if (!musica.currentTime) return;
-  try { localStorage.setItem('bim_musica_pos', JSON.stringify({ src: musica.currentSrc.split('/').pop(), t: musica.currentTime })); } catch (e) {}
-}
-function restaurarPosicaoMusica() {
-  try {
-    const p = JSON.parse(localStorage.getItem('bim_musica_pos') || 'null');
-    if (p && p.src === musica.currentSrc.split('/').pop() && p.t > 0 && p.t < (musica.duration || Infinity) - 1) musica.currentTime = p.t;
-  } catch (e) {}
-}
-if (musica.readyState >= 1) restaurarPosicaoMusica();
-else musica.addEventListener('loadedmetadata', restaurarPosicaoMusica, { once: true });
-setInterval(() => { if (!musica.paused) salvarPosicaoMusica(); }, 2000);
-musica.addEventListener('pause', salvarPosicaoMusica);
+$('btn-proxima').addEventListener('click', () => {
+  primeiroToque = true;
+  if (!ytPronto) return;
+  if (!musicaLigada) {            // pular já liga a música de novo
+    musicaLigada = true;
+    try { localStorage.setItem('bim_musica', 'on'); } catch (e) {}
+  }
+  ytPlayer.nextVideo();
+});
+
+setInterval(() => { if (tocando()) salvarPosicaoMusica(); }, 2000);
 window.addEventListener('pagehide', salvarPosicaoMusica);
 document.addEventListener('visibilitychange', () => { if (document.hidden) salvarPosicaoMusica(); });
-musica.addEventListener('error', () => $('btn-musica').classList.add('escondido'));
-musica.addEventListener('play', atualizarBtnMusica);
-musica.addEventListener('pause', atualizarBtnMusica);
+
+function esconderMusica() { $('btn-musica').classList.add('escondido'); $('btn-proxima').classList.add('escondido'); }
+
+window.onYouTubeIframeAPIReady = function () {
+  const pos = lerPosicaoMusica();
+  ytPlayer = new YT.Player('yt', {
+    width: 200, height: 200,
+    playerVars: { listType: 'playlist', list: PLAYLIST_ID, index: pos.i, start: Math.floor(pos.t), playsinline: 1, controls: 0, disablekb: 1 },
+    events: {
+      onReady: () => {
+        ytPronto = true;
+        ytPlayer.setVolume(VOLUME_MUSICA);
+        ytPlayer.setLoop(true);                // quando a playlist acaba, volta ao começo
+        atualizarBtnMusica();
+        tocarMusica();
+      },
+      onStateChange: e => {
+        if (e.data === 1) errosSeguidos = 0;
+        if (e.data === 1 && !musicaLigada) ytPlayer.pauseVideo();
+        atualizarBtnMusica();
+        if (e.data === 2) salvarPosicaoMusica();
+      },
+      // vídeo indisponível ou que não pode tocar em outros sites: pula para o próximo
+      onError: () => {
+        if (++errosSeguidos > 5) return esconderMusica();
+        try { ytPlayer.nextVideo(); } catch (e) {}
+      }
+    }
+  });
+};
+(function () {
+  const tag = document.createElement('script');
+  tag.src = 'https://www.youtube.com/iframe_api';
+  tag.onerror = esconderMusica;
+  document.head.appendChild(tag);
+})();
 
 // ---------- Sons (sintetizados, sem arquivos) ----------
 let audioCtx;
