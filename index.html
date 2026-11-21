@@ -13,8 +13,14 @@
 
   <!-- Música de fundo: playlist do YouTube (player escondido fora da tela) -->
   <div id="yt-wrap"><div id="yt"></div></div>
-  <button class="botao" id="btn-proxima" title="Próxima música">⏭</button>
-  <button class="botao" id="btn-musica" title="Música ligada/desligada">🎵</button>
+  <div id="barra-musica">
+    <span id="vol-txt" class="escondido"></span>
+    <button class="botao" id="btn-anterior" title="Música anterior">⏮</button>
+    <button class="botao" id="btn-proxima" title="Próxima música">⏭</button>
+    <button class="botao" id="btn-vol-menos" title="Abaixar volume">🔉</button>
+    <button class="botao" id="btn-vol-mais" title="Aumentar volume">🔊</button>
+    <button class="botao" id="btn-musica" title="Música ligada/desligada">🎵</button>
+  </div>
 
   <!-- Janela de login / cadastro -->
   <div class="janela" id="login-win" style="left:50%;top:50%;transform:translate(-50%,-50%);width:290px">

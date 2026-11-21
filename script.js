@@ -46,7 +46,9 @@ try { aplicarTema(localStorage.getItem('bim_tema') || 'azul'); } catch (e) {}
 
 // ---------- Música de fundo (playlist do YouTube) ----------
 const PLAYLIST_ID = 'PLNoJ-jBBofgR_EJkFMaXmKCLm9TtdAYTw';
-const VOLUME_MUSICA = 15;          // 0 a 100 (bem baixinho)
+const VOLUME_MUSICA = 15;          // volume inicial, 0 a 100 (bem baixinho)
+let volume = VOLUME_MUSICA, volTimer = null;
+try { const v = parseInt(localStorage.getItem('bim_volume'), 10); if (v >= 0 && v <= 100) volume = v; } catch (e) {}
 let ytPlayer = null, ytPronto = false, musicaLigada = true, primeiroToque = false, errosSeguidos = 0;
 try { musicaLigada = localStorage.getItem('bim_musica') !== 'off'; } catch (e) {}
 
@@ -87,21 +89,39 @@ $('btn-musica').addEventListener('click', () => {
   if (musicaLigada) ytPlayer.playVideo(); else ytPlayer.pauseVideo();
   atualizarBtnMusica();
 });
-$('btn-proxima').addEventListener('click', () => {
+function pularFaixa(volta) {
   primeiroToque = true;
   if (!ytPronto) return;
   if (!musicaLigada) {            // pular já liga a música de novo
     musicaLigada = true;
     try { localStorage.setItem('bim_musica', 'on'); } catch (e) {}
   }
-  ytPlayer.nextVideo();
-});
+  if (volta) ytPlayer.previousVideo(); else ytPlayer.nextVideo();
+  ytPlayer.playVideo();
+}
+$('btn-proxima').addEventListener('click', () => pularFaixa(false));
+$('btn-anterior').addEventListener('click', () => pularFaixa(true));
+
+// Volume: passos de 5 (até 30) ou 10, salvo no aparelho
+function mudarVolume(sobe) {
+  const passo = volume < 30 || (volume === 30 && !sobe) ? 5 : 10;
+  volume = Math.max(0, Math.min(100, volume + (sobe ? passo : -passo)));
+  try { localStorage.setItem('bim_volume', String(volume)); } catch (e) {}
+  if (ytPronto) ytPlayer.setVolume(volume);
+  const t = $('vol-txt');
+  t.textContent = volume + '%';
+  t.classList.remove('escondido');
+  clearTimeout(volTimer);
+  volTimer = setTimeout(() => t.classList.add('escondido'), 1500);
+}
+$('btn-vol-mais').addEventListener('click', () => mudarVolume(true));
+$('btn-vol-menos').addEventListener('click', () => mudarVolume(false));
 
 setInterval(() => { if (tocando()) salvarPosicaoMusica(); }, 2000);
 window.addEventListener('pagehide', salvarPosicaoMusica);
 document.addEventListener('visibilitychange', () => { if (document.hidden) salvarPosicaoMusica(); });
 
-function esconderMusica() { $('btn-musica').classList.add('escondido'); $('btn-proxima').classList.add('escondido'); }
+function esconderMusica() { $('barra-musica').classList.add('escondido'); }
 
 window.onYouTubeIframeAPIReady = function () {
   const pos = lerPosicaoMusica();
@@ -111,7 +131,7 @@ window.onYouTubeIframeAPIReady = function () {
     events: {
       onReady: () => {
         ytPronto = true;
-        ytPlayer.setVolume(VOLUME_MUSICA);
+        ytPlayer.setVolume(volume);
         ytPlayer.setLoop(true);                // quando a playlist acaba, volta ao começo
         atualizarBtnMusica();
         tocarMusica();
