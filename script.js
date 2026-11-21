@@ -114,6 +114,28 @@ function mudarVolume(sobe) {
   clearTimeout(volTimer);
   volTimer = setTimeout(() => t.classList.add('escondido'), 1500);
 }
+// Os controles extras ficam escondidos (só ⋯ e 🎵) para não cobrir os botões da lista; fecham sozinhos
+let barraTimer = null;
+const extrasMusica = document.querySelectorAll('#barra-musica .extra');
+function mostrarExtras(sim) { extrasMusica.forEach(b => b.classList.toggle('escondido', !sim)); }
+mostrarExtras(false);
+function fecharBarra() { $('barra-musica').classList.remove('aberta'); $('btn-mais').textContent = '⋯'; mostrarExtras(false); }
+function agendarFechar() { clearTimeout(barraTimer); barraTimer = setTimeout(fecharBarra, 4000); }
+$('btn-mais').addEventListener('click', () => {
+  const b = $('barra-musica');
+  if (b.classList.contains('aberta')) { clearTimeout(barraTimer); fecharBarra(); return; }
+  b.classList.add('aberta');
+  mostrarExtras(true);
+  $('btn-mais').textContent = '✕';
+  agendarFechar();
+});
+$('barra-musica').addEventListener('click', e => {
+  if (e.target.id !== 'btn-mais' && $('barra-musica').classList.contains('aberta')) agendarFechar();
+});
+// tocar em qualquer outro lugar da tela também fecha
+document.addEventListener('click', e => {
+  if (!e.target.closest('#barra-musica') && $('barra-musica').classList.contains('aberta')) { clearTimeout(barraTimer); fecharBarra(); }
+});
 $('btn-vol-mais').addEventListener('click', () => mudarVolume(true));
 $('btn-vol-menos').addEventListener('click', () => mudarVolume(false));
 

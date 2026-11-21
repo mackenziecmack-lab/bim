@@ -402,7 +402,7 @@ function servirArquivo(req, res, arq, tipo) {
   const caminho = path.join(__dirname, arq);
   fs.stat(caminho, (e, st) => {
     if (e || !st.isFile()) { res.writeHead(404); return res.end('Arquivo não encontrado'); }
-    const base = { 'Content-Type': tipo, 'Accept-Ranges': 'bytes' };
+    const base = { 'Content-Type': tipo, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache' };
     const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
     if (m && (m[1] || m[2])) {
       let ini, fim;
